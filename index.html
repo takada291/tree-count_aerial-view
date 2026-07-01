@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>空撮画像立木認識ツール</title>
-    <script src="https://cdn.roboflow.com/0.2.26/roboflow.js"></script>
     <style>
         body { font-family: -apple-system, sans-serif; padding: 15px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
@@ -30,7 +29,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲空撮画像立木認識ツール</h2>
+        <h2>🌲 空撮画像立木認識ツール0.1</h2>
     </div>
 
     <div class="controls">
@@ -64,11 +63,12 @@
 
 <script>
     // ==========================================
-    // ★ API設定（Roboflowの情報）
+    // ★ API設定（REST API用）
     // ==========================================
-    const PROJECT_NAME = "tree-count-aerial-view";
-    const API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2"; // ※注：エラーが出る場合はPublishable Keyに差し替えてください
+    const PROJECT_NAME = "tree-count-aerial-view"; // ハイフンで統一
     const MODEL_VERSION = 2;
+    // ※ 直接通信する場合は Private API Key を使用します
+    const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
     // ==========================================
 
     const classColors = {
@@ -78,7 +78,6 @@
         "W":   "#757575"  // 枯死木（グレー）
     };
 
-    let aiModel = null;
     const imageUpload = document.getElementById('imageUpload');
     const sourceImage = document.getElementById('sourceImage');
     const overlayCanvas = document.getElementById('overlayCanvas');
@@ -88,7 +87,7 @@
     const statusMsg = document.getElementById('statusMsg');
     const resultCard = document.getElementById('resultCard');
 
-    // 写真が選択されたときの処理（画面に表示する）
+    // 写真が選択されたときの処理（プレビュー表示）
     imageUpload.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -124,28 +123,68 @@
 
         btn.disabled = true;
         btn.innerText = "⏳ 処理中...";
-        showStatus("AIモデルを読み込み中（初回は少し時間がかかります）...");
+        showStatus("サーバーへ画像を送信中...");
 
         try {
-            // モデルのロード（初回のみ実行）
-            if (!aiModel) {
-                const rf = await window.roboflow.auth({ publishable_key: API_KEY });
-                aiModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
+            // ドローンの重い画像を、送信前に幅1200pxに圧縮する処理
+            const maxSize = 1200; 
+            let width = sourceImage.naturalWidth;
+            let height = sourceImage.naturalHeight;
+
+            if (width > maxSize || height > maxSize) {
+                if (width > height) {
+                    height = Math.round(height * (maxSize / width));
+                    width = maxSize;
+                } else {
+                    width = Math.round(width * (maxSize / height));
+                    height = maxSize;
+                }
             }
 
-            showStatus("画像を解析中...");
+            const tempCanvas = document.createElement("canvas");
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            const tempCtx = tempCanvas.getContext("2d");
+            tempCtx.drawImage(sourceImage, 0, 0, width, height);
+
+            // 画像を文字データ（Base64）に変換
+            const base64Data = tempCanvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+
+            // Roboflowの推論サーバーに直接データを送信
+            const response = await fetch(`https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: base64Data
+            });
+
+            if (!response.ok) {
+                throw new Error(`サーバーエラー: ${response.status} ${response.statusText}`);
+            }
+
+            // サーバーから返ってきた結果（JSON）を受け取る
+            const data = await response.json();
             
-            // AIによる推論の実行
-            const predictions = await aiModel.detect(sourceImage);
-            
-            // 四角形の描画と本数の集計
+            // 圧縮した画像の座標を、元の巨大な写真のサイズに合うように引き伸ばす
+            const scaleX = sourceImage.naturalWidth / width;
+            const scaleY = sourceImage.naturalHeight / height;
+
+            const predictions = data.predictions.map(p => ({
+                class: p.class,
+                bbox: {
+                    x: p.x * scaleX,
+                    y: p.y * scaleY,
+                    width: p.width * scaleX,
+                    height: p.height * scaleY
+                }
+            }));
+
+            showStatus("画像の解析完了！描画します...");
             drawAndCount(predictions);
-            
             showStatus("✅ 解析が完了しました！", "#2e7d32");
 
         } catch (error) {
             console.error(error);
-            showStatus("❌ エラー: " + (error.message || "APIキーが無効、または通信エラーです"), "#d32f2f");
+            showStatus("❌ エラー: " + (error.message || "通信エラーです"), "#d32f2f");
         } finally {
             btn.disabled = false;
             btn.innerText = "🚀 もう一度検知する";
@@ -153,31 +192,25 @@
     }
 
     function drawAndCount(predictions) {
-        // 前の描画を消去
         ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-        
         let counts = { "G_S": 0, "G_H": 0, "R": 0, "W": 0 };
 
         predictions.forEach(p => {
             const className = p.class;
-            if (counts[className] !== undefined) {
-                counts[className]++; // パターン別にカウントアップ
-            }
+            if (counts[className] !== undefined) counts[className]++;
 
-            // Roboflow APIは中心座標(x,y)を返すので、左上の座標に変換
             const w = p.bbox.width;
             const h = p.bbox.height;
             const x = p.bbox.x - (w / 2);
             const y = p.bbox.y - (h / 2);
-
             const color = classColors[className] || "#ff9800";
 
-            // バウンディングボックス（枠線）の描画
+            // バウンディングボックスの描画
             ctx.strokeStyle = color;
-            ctx.lineWidth = Math.max(3, overlayCanvas.width / 400); // 画像サイズに合わせて線の太さを可変
+            ctx.lineWidth = Math.max(3, overlayCanvas.width / 400);
             ctx.strokeRect(x, y, w, h);
 
-            // ラベルの描画（G_Sなどの文字）
+            // ラベルの描画
             ctx.fillStyle = color;
             const fontSize = Math.max(14, overlayCanvas.width / 60);
             ctx.font = `bold ${fontSize}px sans-serif`;
@@ -194,8 +227,7 @@
         document.getElementById('count_R').innerText  = `${counts["R"]} 本`;
         document.getElementById('count_W').innerText  = `${counts["W"]} 本`;
         document.getElementById('count_Total').innerText = `${counts["G_S"] + counts["G_H"] + counts["R"] + counts["W"]} 本`;
-
-        // 結果エリアを表示
+        
         resultCard.style.display = "block";
     }
 </script>
