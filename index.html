@@ -29,7 +29,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲空撮画像立木認識ツール0.8</h2>
+        <h2>🌲空撮画像立木認識ツール0.9</h2>
     </div>
 
     <div class="controls">
@@ -132,7 +132,7 @@
             tempCanvas.getContext("2d").drawImage(sourceImage, 0, 0, width, height);
             const base64Data = tempCanvas.toDataURL("image/jpeg", 0.8).split(",")[1];
 
-            const response = await fetch(`https://detect.roboflow.com/${MODEL_ID}?api_key=${API_KEY}`, {
+            const response = await fetch(`https://detect.roboflow.com/tree-count_aerial-view/2?api_key=${API_KEY}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: base64Data
