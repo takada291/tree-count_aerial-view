@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>空撮木立カウントアプリ</title>
+    <script src="https://cdn.roboflow.com/0.2.26/roboflow.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; padding: 15px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .header-area { border-bottom: 2px solid #2e7d32; margin-bottom: 15px; padding-bottom: 10px; }
+        h2 { margin: 0; font-size: 1.3em; color: #1b5e20; }
+        
+        .controls { display: flex; flex-direction: column; gap: 12px; margin-bottom: 15px; }
+        input[type="file"] { padding: 12px; background: #f1f8e9; border-radius: 8px; border: 1px solid #c5e1a5; cursor: pointer; }
+        .btn-ai-start { background: #1565c0; color: white; padding: 15px; border: none; border-radius: 8px; font-weight: bold; font-size: 1.1rem; cursor: pointer; transition: 0.2s; }
+        .btn-ai-start:disabled { background: #9e9e9e; cursor: not-allowed; }
+        
+        #image-wrapper { position: relative; width: 100%; border-radius: 8px; overflow: hidden; background: #eee; display: none; margin-top: 15px; border: 1px solid #ccc; }
+        #sourceImage { width: 100%; height: auto; display: block; }
+        #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+        
+        .summary-box { background: #f1f8e9; padding: 15px; border-radius: 8px; }
+        .summary-title { margin-top: 0; color: #2e7d32; font-size: 1.2em; border-bottom: 2px solid #c5e1a5; padding-bottom: 5px; margin-bottom: 15px;}
+        .result-row { display: flex; justify-content: space-between; margin-bottom: 10px; font-weight: bold; font-size: 1.1em; align-items: center; }
+        .result-color { display: inline-block; width: 16px; height: 16px; border-radius: 4px; margin-right: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div class="header-area">
+        <h2>🌲 空撮木立カウントアプリ</h2>
+    </div>
+
+    <div class="controls">
+        <label style="font-size: 0.95em; color: #555; font-weight: bold;">1. ドローンの空撮写真を選択</label>
+        <input type="file" id="imageUpload" accept="image/*">
+        
+        <label style="font-size: 0.95em; color: #555; font-weight: bold; margin-top: 5px;">2. AIで解析を実行</label>
+        <button class="btn-ai-start" id="aiStartBtn" onclick="runDetection()">🚀 検知スタート</button>
+    </div>
+
+    <div id="statusMsg" style="color: #d32f2f; font-weight: bold; margin-bottom: 10px; display: none; text-align: center;"></div>
+
+    <div id="image-wrapper">
+        <img id="sourceImage">
+        <canvas id="overlayCanvas"></canvas>
+    </div>
+</div>
+
+<div class="card" id="resultCard" style="display: none;">
+    <div class="summary-box">
+        <h3 class="summary-title">📊 カウント結果</h3>
+        <div class="result-row"><span style="color:#2e7d32; display:flex; align-items:center;"><span class="result-color" style="background:#2e7d32;"></span>生立木・スギ (G_S)</span> <span id="count_GS">0 本</span></div>
+        <div class="result-row"><span style="color:#1565c0; display:flex; align-items:center;"><span class="result-color" style="background:#1565c0;"></span>生立木・ヒノキ (G_H)</span> <span id="count_GH">0 本</span></div>
+        <div class="result-row"><span style="color:#c62828; display:flex; align-items:center;"><span class="result-color" style="background:#c62828;"></span>赤枯れ (R)</span> <span id="count_R">0 本</span></div>
+        <div class="result-row"><span style="color:#757575; display:flex; align-items:center;"><span class="result-color" style="background:#757575;"></span>枯死木 (W)</span> <span id="count_W">0 本</span></div>
+        <div class="result-row" style="margin-top: 20px; border-top: 2px dashed #9ccc65; padding-top: 15px; font-size: 1.4em; color: #1b5e20;">
+            <span>合計</span> <span id="count_Total">0 本</span>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ==========================================
+    // ★ API設定（Roboflowの情報）
+    // ==========================================
+    const PROJECT_NAME = "tree-count_aerial-view";
+    const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; // ※注：エラーが出る場合はPublishable Keyに差し替えてください
+    const MODEL_VERSION = 2;
+    // ==========================================
+
+    const classColors = {
+        "G_S": "#2e7d32", // スギ（緑）
+        "G_H": "#1565c0", // ヒノキ（青）
+        "R":   "#c62828", // 赤枯れ（赤）
+        "W":   "#757575"  // 枯死木（グレー）
+    };
+
+    let aiModel = null;
+    const imageUpload = document.getElementById('imageUpload');
+    const sourceImage = document.getElementById('sourceImage');
+    const overlayCanvas = document.getElementById('overlayCanvas');
+    const ctx = overlayCanvas.getContext('2d');
+    const imageWrapper = document.getElementById('image-wrapper');
+    const btn = document.getElementById('aiStartBtn');
+    const statusMsg = document.getElementById('statusMsg');
+    const resultCard = document.getElementById('resultCard');
+
+    // 写真が選択されたときの処理（画面に表示する）
+    imageUpload.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            sourceImage.src = event.target.result;
+            sourceImage.onload = () => {
+                imageWrapper.style.display = "block";
+                resultCard.style.display = "none";
+                
+                // キャンバスのサイズを実際の画像サイズに合わせる
+                overlayCanvas.width = sourceImage.naturalWidth;
+                overlayCanvas.height = sourceImage.naturalHeight;
+                ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+                statusMsg.style.display = "none";
+            }
+        };
+        reader.readAsDataURL(file);
+    });
+
+    function showStatus(text, color = "#1565c0") {
+        statusMsg.style.display = "block";
+        statusMsg.style.color = color;
+        statusMsg.innerText = text;
+    }
+
+    async function runDetection() {
+        if (!sourceImage.src || sourceImage.src === window.location.href) {
+            alert("まずは解析する空撮写真を選択してください。");
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerText = "⏳ 処理中...";
+        showStatus("AIモデルを読み込み中（初回は少し時間がかかります）...");
+
+        try {
+            // モデルのロード（初回のみ実行）
+            if (!aiModel) {
+                const rf = await window.roboflow.auth({ publishable_key: API_KEY });
+                aiModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
+            }
+
+            showStatus("画像を解析中...");
+            
+            // AIによる推論の実行
+            const predictions = await aiModel.detect(sourceImage);
+            
+            // 四角形の描画と本数の集計
+            drawAndCount(predictions);
+            
+            showStatus("✅ 解析が完了しました！", "#2e7d32");
+
+        } catch (error) {
+            console.error(error);
+            showStatus("❌ エラー: " + (error.message || "APIキーが無効、または通信エラーです"), "#d32f2f");
+        } finally {
+            btn.disabled = false;
+            btn.innerText = "🚀 もう一度検知する";
+        }
+    }
+
+    function drawAndCount(predictions) {
+        // 前の描画を消去
+        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        
+        let counts = { "G_S": 0, "G_H": 0, "R": 0, "W": 0 };
+
+        predictions.forEach(p => {
+            const className = p.class;
+            if (counts[className] !== undefined) {
+                counts[className]++; // パターン別にカウントアップ
+            }
+
+            // Roboflow APIは中心座標(x,y)を返すので、左上の座標に変換
+            const w = p.bbox.width;
+            const h = p.bbox.height;
+            const x = p.bbox.x - (w / 2);
+            const y = p.bbox.y - (h / 2);
+
+            const color = classColors[className] || "#ff9800";
+
+            // バウンディングボックス（枠線）の描画
+            ctx.strokeStyle = color;
+            ctx.lineWidth = Math.max(3, overlayCanvas.width / 400); // 画像サイズに合わせて線の太さを可変
+            ctx.strokeRect(x, y, w, h);
+
+            // ラベルの描画（G_Sなどの文字）
+            ctx.fillStyle = color;
+            const fontSize = Math.max(14, overlayCanvas.width / 60);
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            const textWidth = ctx.measureText(className).width;
+            
+            ctx.fillRect(x, y - fontSize - 6, textWidth + 10, fontSize + 6);
+            ctx.fillStyle = "#FFFFFF";
+            ctx.fillText(className, x + 5, y - 5);
+        });
+
+        // 画面のカウント結果を更新
+        document.getElementById('count_GS').innerText = `${counts["G_S"]} 本`;
+        document.getElementById('count_GH').innerText = `${counts["G_H"]} 本`;
+        document.getElementById('count_R').innerText  = `${counts["R"]} 本`;
+        document.getElementById('count_W').innerText  = `${counts["W"]} 本`;
+        document.getElementById('count_Total').innerText = `${counts["G_S"] + counts["G_H"] + counts["R"] + counts["W"]} 本`;
+
+        // 結果エリアを表示
+        resultCard.style.display = "block";
+    }
+</script>
+</body>
+</html>
