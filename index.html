@@ -1,1 +1,374 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>樹頂点AI検知アプリ</title>
+    
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#2e7d32">
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="樹頂点検知">
+    <link rel="apple-touch-icon" href="icon-512.png">
 
+    <script src="https://cdn.roboflow.com/0.2.26/roboflow.js"></script>
+
+    <style>
+        body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
+        .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        .header-area { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #2e7d32; margin-bottom: 10px; padding-bottom: 5px; }
+        h2 { margin: 0; font-size: 1.1em; color: #1b5e20; }
+        
+        .btn { padding: 10px 15px; border: none; border-radius: 6px; font-weight: bold; font-size: 0.95rem; cursor: pointer; text-align: center; width: 100%; margin-bottom: 10px; box-sizing: border-box;}
+        .btn-primary { background: #1565c0; color: white; }
+        .btn-success { background: #2e7d32; color: white; }
+        .btn-warning { background: #f57f17; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        
+        .btn:disabled { background: #bdbdbd; cursor: not-allowed; }
+
+        .controls { display: flex; gap: 10px; margin-bottom: 10px; }
+        .controls .btn { margin-bottom: 0; }
+
+        #canvas-container { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 250px; margin-bottom: 10px;}
+        canvas { max-width: 100%; height: auto; touch-action: none; }
+
+        .summary-box { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: #f1f8e9; padding: 10px; border-radius: 8px; font-weight: bold; font-size: 1.1em; color: #1b5e20; }
+        .stat { display: flex; justify-content: space-between; padding: 5px 10px; background: white; border-radius: 6px; border: 1px solid #c5e1a5;}
+        .stat-s { color: #2e7d32; }
+        .stat-r { color: #c62828; }
+        .stat-w { color: #616161; }
+        .stat-total { color: #1565c0; grid-column: span 2; }
+        
+        .mode-text { font-size: 0.85em; color: #d32f2f; margin-bottom: 5px; font-weight: bold; text-align: center;}
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div class="header-area">
+        <h2>🌲 樹頂点 AI検知アプリ V1.0</h2>
+    </div>
+
+    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. オンライン環境でモデルを読み込んでください</div>
+
+    <button id="btnLoadModel" class="btn btn-primary" onclick="loadModel()">🌐 モデルを読み込む (通信必須)</button>
+    
+    <label class="btn btn-secondary" style="display:block;">
+        📸 写真を選択 / 撮影
+        <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
+    </label>
+
+    <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 AI検知スタート</button>
+</div>
+
+<div class="card">
+    <div class="controls">
+        <button id="btnMode" class="btn btn-warning" onclick="toggleMode()">⬜ 範囲選択モード: OFF</button>
+        <button class="btn btn-secondary" onclick="resetSelection()">🔄 範囲リセット</button>
+    </div>
+    <div id="modeMessage" class="mode-text" style="display:none;">画像をドラッグしてカウント範囲を指定してください</div>
+
+    <div id="canvas-container">
+        <canvas id="viewCanvas"></canvas>
+    </div>
+</div>
+
+<div class="card">
+    <h3 style="margin-top:0; font-size: 1rem; color:#1b5e20;">📊 検知結果</h3>
+    <div class="summary-box">
+        <div class="stat stat-s"><span>スギ (s):</span> <span id="countS">0</span></div>
+        <div class="stat stat-r"><span>赤枯 (r):</span> <span id="countR">0</span></div>
+        <div class="stat stat-w"><span>枯死 (w):</span> <span id="countW">0</span></div>
+        <div class="stat stat-total"><span>合計:</span> <span id="countTotal">0</span></div>
+    </div>
+</div>
+
+<script>
+    // ==========================================
+    // API設定
+    // ==========================================
+    const PROJECT_NAME = "treetopcount";
+    const API_KEY = "WgeEKlqfSAI1zfDZcRyS";
+    const MODEL_VERSION = 1;
+    // ==========================================
+
+    let logModel = null;
+    let imgElement = new Image();
+    let predictionsData = [];
+    
+    const canvas = document.getElementById('viewCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // UI Elements
+    const btnLoadModel = document.getElementById('btnLoadModel');
+    const btnDetect = document.getElementById('btnDetect');
+    const btnMode = document.getElementById('btnMode');
+    const statusMsg = document.getElementById('statusMsg');
+    
+    let isSelectionMode = false;
+    let isDrawing = false;
+    let selectionRect = null; // {x, y, w, h}
+    let startPos = {x:0, y:0};
+
+    // --- モデル読み込み ---
+    async function loadModel() {
+        if(logModel) return;
+        btnLoadModel.innerText = "⏳ 読み込み中...";
+        btnLoadModel.disabled = true;
+        try {
+            const rf = await window.roboflow.auth({ publishable_key: API_KEY });
+            logModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
+            
+            btnLoadModel.innerText = "✅ モデル読み込み完了";
+            statusMsg.innerText = "2. 画像を選択して検知を実行してください";
+            statusMsg.style.color = "#2e7d32";
+            if(imgElement.src) btnDetect.disabled = false;
+        } catch (e) {
+            alert("モデルの読み込みに失敗しました。オンラインか確認してください。
+" + e);
+            btnLoadModel.innerText = "🌐 モデルを読み込む (通信必須)";
+            btnLoadModel.disabled = false;
+        }
+    }
+
+    // --- 画像読み込み ---
+    function loadImage(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            imgElement.onload = function() {
+                canvas.width = imgElement.width;
+                canvas.height = imgElement.height;
+                ctx.drawImage(imgElement, 0, 0);
+                predictionsData = [];
+                selectionRect = null;
+                updateCounts();
+                if(logModel) btnDetect.disabled = false;
+            }
+            imgElement.src = e.target.result;
+        }
+        reader.readAsDataURL(file);
+    }
+
+    // --- AI検知 ---
+    async function runDetection() {
+        if(!logModel || !imgElement.src) return;
+        btnDetect.innerText = "⏳ 検知中...";
+        btnDetect.disabled = true;
+        
+        try {
+            // 画像から推論
+            const predictions = await logModel.detect(imgElement);
+            predictionsData = predictions;
+            
+            selectionRect = null; // 検知し直したら選択範囲リセット
+            drawCanvas();
+            updateCounts();
+            
+            btnDetect.innerText = "✅ 検知完了 (再実行)";
+        } catch(e) {
+            alert("検知エラー: " + e);
+            btnDetect.innerText = "🚀 AI検知スタート";
+        }
+        btnDetect.disabled = false;
+    }
+
+    // --- 描画処理 ---
+    function drawCanvas() {
+        if(!imgElement.src) return;
+        
+        // 画像をクリアして描画
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(imgElement, 0, 0);
+        
+        // Bounding Boxの描画
+        predictionsData.forEach(p => {
+            const boxColor = getColorForClass(p.class);
+            const cx = p.bbox.x;
+            const cy = p.bbox.y;
+            const w = p.bbox.width;
+            const h = p.bbox.height;
+            const x = cx - w / 2;
+            const y = cy - h / 2;
+            
+            // 選択範囲がある場合、範囲外のボックスは半透明にする
+            let alpha = 1.0;
+            if (selectionRect) {
+                if (!isInsideRect(cx, cy, selectionRect)) {
+                    alpha = 0.2;
+                }
+            }
+
+            ctx.globalAlpha = alpha;
+            ctx.strokeStyle = boxColor;
+            ctx.lineWidth = Math.max(2, canvas.width / 500);
+            ctx.strokeRect(x, y, w, h);
+            
+            // ラベル背景と文字
+            ctx.fillStyle = boxColor;
+            const fontSize = Math.max(12, canvas.width / 60);
+            ctx.font = `bold ${fontSize}px Arial`;
+            
+            // 信頼度も表示
+            const text = `${p.class} ${Math.round(p.confidence*100)}%`;
+            const textWidth = ctx.measureText(text).width;
+            ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(text, x + 2, y - 4);
+        });
+        
+        ctx.globalAlpha = 1.0;
+
+        // 選択範囲の矩形を描画
+        if (selectionRect) {
+            ctx.strokeStyle = '#f57f17';
+            ctx.lineWidth = Math.max(3, canvas.width / 300);
+            ctx.setLineDash([10, 10]); // 点線
+            ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
+            ctx.setLineDash([]); // 実線に戻す
+            
+            ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
+            ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
+        }
+    }
+
+    function getColorForClass(className) {
+        if (className === 's') return '#2e7d32'; // 緑 (スギ)
+        if (className === 'r') return '#c62828'; // 赤 (赤枯)
+        if (className === 'w') return '#616161'; // 灰 (枯死)
+        return '#1565c0'; // デフォルト青
+    }
+
+    // --- カウント集計 ---
+    function updateCounts() {
+        let countS = 0, countR = 0, countW = 0;
+        
+        predictionsData.forEach(p => {
+            const cx = p.bbox.x;
+            const cy = p.bbox.y;
+            
+            // 選択範囲がある場合、範囲内のみカウント
+            if (selectionRect && !isInsideRect(cx, cy, selectionRect)) {
+                return; // スキップ
+            }
+            
+            if (p.class === 's') countS++;
+            else if (p.class === 'r') countR++;
+            else if (p.class === 'w') countW++;
+        });
+
+        document.getElementById('countS').innerText = countS;
+        document.getElementById('countR').innerText = countR;
+        document.getElementById('countW').innerText = countW;
+        document.getElementById('countTotal').innerText = countS + countR + countW;
+    }
+
+    // --- 範囲選択 (キャンバス操作) ---
+    function toggleMode() {
+        isSelectionMode = !isSelectionMode;
+        if (isSelectionMode) {
+            btnMode.innerText = "🟨 範囲選択モード: ON";
+            btnMode.classList.remove('btn-warning');
+            btnMode.classList.add('btn-primary');
+            document.getElementById('modeMessage').style.display = 'block';
+        } else {
+            btnMode.innerText = "⬜ 範囲選択モード: OFF";
+            btnMode.classList.add('btn-warning');
+            btnMode.classList.remove('btn-primary');
+            document.getElementById('modeMessage').style.display = 'none';
+        }
+    }
+
+    function resetSelection() {
+        selectionRect = null;
+        drawCanvas();
+        updateCounts();
+    }
+
+    function getMousePos(e) {
+        const rect = canvas.getBoundingClientRect();
+        // キャンバスの表示サイズと実サイズの比率を計算
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        
+        let clientX = e.clientX;
+        let clientY = e.clientY;
+        
+        if(e.touches && e.touches.length > 0) {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        }
+
+        return {
+            x: (clientX - rect.left) * scaleX,
+            y: (clientY - rect.top) * scaleY
+        };
+    }
+
+    function isInsideRect(x, y, rect) {
+        // 負の幅/高さに対応するための正規化
+        const rx = Math.min(rect.x, rect.x + rect.w);
+        const ry = Math.min(rect.y, rect.y + rect.h);
+        const rw = Math.abs(rect.w);
+        const rh = Math.abs(rect.h);
+        
+        return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
+    }
+
+    // イベントリスナー
+    const startInteraction = (e) => {
+        if (!isSelectionMode || !imgElement.src) return;
+        e.preventDefault(); // スクロール防止
+        isDrawing = true;
+        startPos = getMousePos(e);
+        selectionRect = { x: startPos.x, y: startPos.y, w: 0, h: 0 };
+    };
+
+    const moveInteraction = (e) => {
+        if (!isDrawing) return;
+        e.preventDefault();
+        const currentPos = getMousePos(e);
+        selectionRect.w = currentPos.x - startPos.x;
+        selectionRect.h = currentPos.y - startPos.y;
+        drawCanvas();
+    };
+
+    const endInteraction = (e) => {
+        if (!isDrawing) return;
+        isDrawing = false;
+        
+        // 矩形が小さすぎる場合はキャンセルとみなす
+        if (Math.abs(selectionRect.w) < 10 || Math.abs(selectionRect.h) < 10) {
+            selectionRect = null;
+        }
+        
+        drawCanvas();
+        updateCounts();
+    };
+
+    // マウス
+    canvas.addEventListener('mousedown', startInteraction);
+    canvas.addEventListener('mousemove', moveInteraction);
+    canvas.addEventListener('mouseup', endInteraction);
+    canvas.addEventListener('mouseout', endInteraction);
+    // タッチ
+    canvas.addEventListener('touchstart', startInteraction, {passive: false});
+    canvas.addEventListener('touchmove', moveInteraction, {passive: false});
+    canvas.addEventListener('touchend', endInteraction);
+
+    // PWA Service Worker 登録
+    window.addEventListener('load', () => {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js')
+                .then(reg => console.log('SW registered!', reg))
+                .catch(err => console.log('SW registration failed', err));
+        }
+    });
+</script>
+</body>
+</html>

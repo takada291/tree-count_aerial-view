@@ -1,0 +1,17 @@
+{
+  "name": "樹頂点AI検知アプリ",
+  "short_name": "樹頂点検知",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#e8f5e9",
+  "theme_color": "#2e7d32",
+  "scope": "./",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
