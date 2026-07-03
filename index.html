@@ -49,7 +49,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V1.1</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V1.2</h2>
     </div>
 
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. オンライン環境でモデルを読み込んでください</div>
@@ -127,8 +127,7 @@
             statusMsg.style.color = "#2e7d32";
             if(imgElement.src) btnDetect.disabled = false;
         } catch (e) {
-            alert("モデルの読み込みに失敗しました。オンラインか確認してください。
-" + e);
+            alert("モデルの読み込みに失敗しました。オンラインか確認してください。\n" + e);
             btnLoadModel.innerText = "🌐 モデルを読み込む (通信必須)";
             btnLoadModel.disabled = false;
         }
@@ -229,146 +228,4 @@
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
             ctx.setLineDash([10, 10]); // 点線
-            ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
-            ctx.setLineDash([]); // 実線に戻す
-            
-            ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
-            ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
-        }
-    }
-
-    function getColorForClass(className) {
-        if (className === 's') return '#2e7d32'; // 緑 (スギ)
-        if (className === 'r') return '#c62828'; // 赤 (赤枯)
-        if (className === 'w') return '#616161'; // 灰 (枯死)
-        return '#1565c0'; // デフォルト青
-    }
-
-    // --- カウント集計 ---
-    function updateCounts() {
-        let countS = 0, countR = 0, countW = 0;
-        
-        predictionsData.forEach(p => {
-            const cx = p.bbox.x;
-            const cy = p.bbox.y;
-            
-            // 選択範囲がある場合、範囲内のみカウント
-            if (selectionRect && !isInsideRect(cx, cy, selectionRect)) {
-                return; // スキップ
-            }
-            
-            if (p.class === 's') countS++;
-            else if (p.class === 'r') countR++;
-            else if (p.class === 'w') countW++;
-        });
-
-        document.getElementById('countS').innerText = countS;
-        document.getElementById('countR').innerText = countR;
-        document.getElementById('countW').innerText = countW;
-        document.getElementById('countTotal').innerText = countS + countR + countW;
-    }
-
-    // --- 範囲選択 (キャンバス操作) ---
-    function toggleMode() {
-        isSelectionMode = !isSelectionMode;
-        if (isSelectionMode) {
-            btnMode.innerText = "🟨 範囲選択モード: ON";
-            btnMode.classList.remove('btn-warning');
-            btnMode.classList.add('btn-primary');
-            document.getElementById('modeMessage').style.display = 'block';
-        } else {
-            btnMode.innerText = "⬜ 範囲選択モード: OFF";
-            btnMode.classList.add('btn-warning');
-            btnMode.classList.remove('btn-primary');
-            document.getElementById('modeMessage').style.display = 'none';
-        }
-    }
-
-    function resetSelection() {
-        selectionRect = null;
-        drawCanvas();
-        updateCounts();
-    }
-
-    function getMousePos(e) {
-        const rect = canvas.getBoundingClientRect();
-        // キャンバスの表示サイズと実サイズの比率を計算
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
-        
-        let clientX = e.clientX;
-        let clientY = e.clientY;
-        
-        if(e.touches && e.touches.length > 0) {
-            clientX = e.touches[0].clientX;
-            clientY = e.touches[0].clientY;
-        }
-
-        return {
-            x: (clientX - rect.left) * scaleX,
-            y: (clientY - rect.top) * scaleY
-        };
-    }
-
-    function isInsideRect(x, y, rect) {
-        // 負の幅/高さに対応するための正規化
-        const rx = Math.min(rect.x, rect.x + rect.w);
-        const ry = Math.min(rect.y, rect.y + rect.h);
-        const rw = Math.abs(rect.w);
-        const rh = Math.abs(rect.h);
-        
-        return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
-    }
-
-    // イベントリスナー
-    const startInteraction = (e) => {
-        if (!isSelectionMode || !imgElement.src) return;
-        e.preventDefault(); // スクロール防止
-        isDrawing = true;
-        startPos = getMousePos(e);
-        selectionRect = { x: startPos.x, y: startPos.y, w: 0, h: 0 };
-    };
-
-    const moveInteraction = (e) => {
-        if (!isDrawing) return;
-        e.preventDefault();
-        const currentPos = getMousePos(e);
-        selectionRect.w = currentPos.x - startPos.x;
-        selectionRect.h = currentPos.y - startPos.y;
-        drawCanvas();
-    };
-
-    const endInteraction = (e) => {
-        if (!isDrawing) return;
-        isDrawing = false;
-        
-        // 矩形が小さすぎる場合はキャンセルとみなす
-        if (Math.abs(selectionRect.w) < 10 || Math.abs(selectionRect.h) < 10) {
-            selectionRect = null;
-        }
-        
-        drawCanvas();
-        updateCounts();
-    };
-
-    // マウス
-    canvas.addEventListener('mousedown', startInteraction);
-    canvas.addEventListener('mousemove', moveInteraction);
-    canvas.addEventListener('mouseup', endInteraction);
-    canvas.addEventListener('mouseout', endInteraction);
-    // タッチ
-    canvas.addEventListener('touchstart', startInteraction, {passive: false});
-    canvas.addEventListener('touchmove', moveInteraction, {passive: false});
-    canvas.addEventListener('touchend', endInteraction);
-
-    // PWA Service Worker 登録
-    window.addEventListener('load', () => {
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js')
-                .then(reg => console.log('SW registered!', reg))
-                .catch(err => console.log('SW registration failed', err));
-        }
-    });
-</script>
-</body>
-</html>
+            ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selection
