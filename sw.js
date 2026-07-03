@@ -1,4 +1,4 @@
-const CACHE_NAME = 'treetop-ai-cache-v1.6.0'; // ★バージョンを変えることで超強力クリア発動
+const CACHE_NAME = 'treetop-ai-cache-v1.7.0'; // ★バージョンを変えることで超強力クリア発動
 const urlsToCache = [
   './',
   'index.html',
