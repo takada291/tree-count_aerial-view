@@ -49,7 +49,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V0.3</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V2.0</h2>
     </div>
 
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. オンライン環境でモデルを読み込んでください</div>
@@ -88,11 +88,12 @@
 
 <script>
     // ==========================================
-    // API設定
+    // API設定（修正済）
     // ==========================================
-    const PROJECT_NAME = "manabus-workspace/treetopcount-2-yolov8n-t1";
+    // ※Roboflowのライブラリが自動でURLを作るため、純粋なプロジェクト名だけを指定します。
+    const PROJECT_NAME = "treetopcount";
     const API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2";
-    const MODEL_VERSION = 2;
+    const MODEL_VERSION = 2; // V2モデルを指定
     // ==========================================
 
     let logModel = null;
@@ -120,6 +121,7 @@
         btnLoadModel.disabled = true;
         try {
             const rf = await window.roboflow.auth({ publishable_key: API_KEY });
+            // ここでPROJECT_NAME（treetopcount）とMODEL_VERSION（2）が合体して正しい通信先になります
             logModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
             
             btnLoadModel.innerText = "✅ モデル読み込み完了";
@@ -130,6 +132,7 @@
             alert("モデルの読み込みに失敗しました。オンラインか確認してください。\n" + e);
             btnLoadModel.innerText = "🌐 モデルを読み込む (通信必須)";
             btnLoadModel.disabled = false;
+            console.error("Roboflow Load Error:", e); // F12で詳細なエラーを見れるように追加
         }
     }
 
