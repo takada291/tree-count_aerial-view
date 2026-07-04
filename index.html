@@ -47,10 +47,10 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V3.0 (Cloud)</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V3.1 (Cloud)</h2>
     </div>
 
-    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. 写真を選択または撮影してください</div>
+    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 
     <label class="btn btn-secondary" style="display:block;">
         📸 写真を選択 / 撮影
@@ -122,7 +122,9 @@
                 selectionRect = null;
                 updateCounts();
                 btnDetect.disabled = false;
-                statusMsg.innerText = "2. AI検知スタートを押してください";
+                
+                // 画像読込後のメッセージもご希望のものに統一
+                statusMsg.innerText = "写真を選択・撮影して検知ボタンを押してください";
                 statusMsg.style.color = "#2e7d32";
             }
             imgElement.src = e.target.result;
@@ -143,6 +145,7 @@
             tmpCanvas.height = imgElement.height;
             const tmpCtx = tmpCanvas.getContext('2d');
             tmpCtx.drawImage(imgElement, 0, 0);
+            
             // JPEG品質0.8で圧縮して送信（通信量を抑える）
             const dataURL = tmpCanvas.toDataURL('image/jpeg', 0.8);
             const base64Image = dataURL.split(',')[1]; 
@@ -340,9 +343,17 @@
     canvas.addEventListener('touchmove', moveInteraction, {passive: false});
     canvas.addEventListener('touchend', endInteraction);
 
+    // ==========================================
+    // 邪魔なService Workerを自動でクビにする処理
+    // ==========================================
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW fail', err));
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister(); // これで古い門番が消去されます
+                    console.log('Service Worker disabled.');
+                }
+            });
         }
     });
 </script>
