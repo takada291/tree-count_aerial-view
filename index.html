@@ -13,8 +13,6 @@
     <meta name="apple-mobile-web-app-title" content="樹頂点検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
-    <script src="https://cdn.roboflow.com/0.2.26/roboflow.js"></script>
-
     <style>
         body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
@@ -49,19 +47,17 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V2.0</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V3.0 (Cloud)</h2>
     </div>
 
-    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. オンライン環境でモデルを読み込んでください</div>
+    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">1. 写真を選択または撮影してください</div>
 
-    <button id="btnLoadModel" class="btn btn-primary" onclick="loadModel()">🌐 モデルを読み込む (通信必須)</button>
-    
     <label class="btn btn-secondary" style="display:block;">
         📸 写真を選択 / 撮影
         <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
     </label>
 
-    <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 AI検知スタート</button>
+    <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 クラウドAI検知スタート</button>
 </div>
 
 <div class="card">
@@ -88,15 +84,13 @@
 
 <script>
     // ==========================================
-    // API設定（修正済）
+    // API設定 (Cloud REST API用)
     // ==========================================
-    // ※Roboflowのライブラリが自動でURLを作るため、純粋なプロジェクト名だけを指定します。
     const PROJECT_NAME = "treetopcount";
     const API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2";
-    const MODEL_VERSION = 2; // V2モデルを指定
+    const MODEL_VERSION = 2;
     // ==========================================
 
-    let logModel = null;
     let imgElement = new Image();
     let predictionsData = [];
     
@@ -104,7 +98,6 @@
     const ctx = canvas.getContext('2d');
     
     // UI Elements
-    const btnLoadModel = document.getElementById('btnLoadModel');
     const btnDetect = document.getElementById('btnDetect');
     const btnMode = document.getElementById('btnMode');
     const statusMsg = document.getElementById('statusMsg');
@@ -113,28 +106,6 @@
     let isDrawing = false;
     let selectionRect = null; // {x, y, w, h}
     let startPos = {x:0, y:0};
-
-    // --- モデル読み込み ---
-    async function loadModel() {
-        if(logModel) return;
-        btnLoadModel.innerText = "⏳ 読み込み中...";
-        btnLoadModel.disabled = true;
-        try {
-            const rf = await window.roboflow.auth({ publishable_key: API_KEY });
-            // ここでPROJECT_NAME（treetopcount）とMODEL_VERSION（2）が合体して正しい通信先になります
-            logModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
-            
-            btnLoadModel.innerText = "✅ モデル読み込み完了";
-            statusMsg.innerText = "2. 画像を選択して検知を実行してください";
-            statusMsg.style.color = "#2e7d32";
-            if(imgElement.src) btnDetect.disabled = false;
-        } catch (e) {
-            alert("モデルの読み込みに失敗しました。オンラインか確認してください。\n" + e);
-            btnLoadModel.innerText = "🌐 モデルを読み込む (通信必須)";
-            btnLoadModel.disabled = false;
-            console.error("Roboflow Load Error:", e); // F12で詳細なエラーを見れるように追加
-        }
-    }
 
     // --- 画像読み込み ---
     function loadImage(event) {
@@ -150,32 +121,56 @@
                 predictionsData = [];
                 selectionRect = null;
                 updateCounts();
-                if(logModel) btnDetect.disabled = false;
+                btnDetect.disabled = false;
+                statusMsg.innerText = "2. AI検知スタートを押してください";
+                statusMsg.style.color = "#2e7d32";
             }
             imgElement.src = e.target.result;
         }
         reader.readAsDataURL(file);
     }
 
-    // --- AI検知 ---
+    // --- クラウドAI検知 (REST API) ---
     async function runDetection() {
-        if(!logModel || !imgElement.src) return;
-        btnDetect.innerText = "⏳ 検知中...";
+        if(!imgElement.src) return;
+        btnDetect.innerText = "⏳ クラウドで推論中...";
         btnDetect.disabled = true;
         
         try {
-            // 画像から推論
-            const predictions = await logModel.detect(imgElement);
-            predictionsData = predictions;
+            // 画像をBase64テキストに変換
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = imgElement.width;
+            tmpCanvas.height = imgElement.height;
+            const tmpCtx = tmpCanvas.getContext('2d');
+            tmpCtx.drawImage(imgElement, 0, 0);
+            // JPEG品質0.8で圧縮して送信（通信量を抑える）
+            const dataURL = tmpCanvas.toDataURL('image/jpeg', 0.8);
+            const base64Image = dataURL.split(',')[1]; 
+
+            // Roboflowサーバーへ直接POST送信
+            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: base64Image
+            });
+
+            if (!response.ok) {
+                throw new Error(`サーバーエラー: ${response.status}`);
+            }
+
+            const data = await response.json();
+            predictionsData = data.predictions || [];
             
-            selectionRect = null; // 検知し直したら選択範囲リセット
+            selectionRect = null;
             drawCanvas();
             updateCounts();
             
             btnDetect.innerText = "✅ 検知完了 (再実行)";
         } catch(e) {
-            alert("検知エラー: " + e);
-            btnDetect.innerText = "🚀 AI検知スタート";
+            alert("検知エラー: 通信環境を確認してください。\n" + e.message);
+            btnDetect.innerText = "🚀 クラウドAI検知スタート";
+            console.error(e);
         }
         btnDetect.disabled = false;
     }
@@ -184,21 +179,19 @@
     function drawCanvas() {
         if(!imgElement.src) return;
         
-        // 画像をクリアして描画
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(imgElement, 0, 0);
         
-        // Bounding Boxの描画
         predictionsData.forEach(p => {
             const boxColor = getColorForClass(p.class);
-            const cx = p.bbox.x;
-            const cy = p.bbox.y;
-            const w = p.bbox.width;
-            const h = p.bbox.height;
+            // REST APIの返り値は x, y が中心座標
+            const cx = p.x;
+            const cy = p.y;
+            const w = p.width;
+            const h = p.height;
             const x = cx - w / 2;
             const y = cy - h / 2;
             
-            // 選択範囲がある場合、範囲外のボックスは半透明にする
             let alpha = 1.0;
             if (selectionRect) {
                 if (!isInsideRect(cx, cy, selectionRect)) {
@@ -211,12 +204,10 @@
             ctx.lineWidth = Math.max(2, canvas.width / 500);
             ctx.strokeRect(x, y, w, h);
             
-            // ラベル背景と文字
             ctx.fillStyle = boxColor;
             const fontSize = Math.max(12, canvas.width / 60);
             ctx.font = `bold ${fontSize}px Arial`;
             
-            // 信頼度も表示
             const text = `${p.class} ${Math.round(p.confidence*100)}%`;
             const textWidth = ctx.measureText(text).width;
             ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
@@ -226,13 +217,12 @@
         
         ctx.globalAlpha = 1.0;
 
-        // 選択範囲の矩形を描画
         if (selectionRect) {
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
-            ctx.setLineDash([10, 10]); // 点線
+            ctx.setLineDash([10, 10]);
             ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
-            ctx.setLineDash([]); // 実線に戻す
+            ctx.setLineDash([]);
             
             ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
             ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
@@ -240,24 +230,20 @@
     }
 
     function getColorForClass(className) {
-        if (className === 's') return '#2e7d32'; // 緑 (スギ)
-        if (className === 'r') return '#c62828'; // 赤 (赤枯)
-        if (className === 'w') return '#616161'; // 灰 (枯死)
-        return '#1565c0'; // デフォルト青
+        if (className === 's') return '#2e7d32'; 
+        if (className === 'r') return '#c62828'; 
+        if (className === 'w') return '#616161'; 
+        return '#1565c0'; 
     }
 
-    // --- カウント集計 ---
     function updateCounts() {
         let countS = 0, countR = 0, countW = 0;
         
         predictionsData.forEach(p => {
-            const cx = p.bbox.x;
-            const cy = p.bbox.y;
+            const cx = p.x;
+            const cy = p.y;
             
-            // 選択範囲がある場合、範囲内のみカウント
-            if (selectionRect && !isInsideRect(cx, cy, selectionRect)) {
-                return; // スキップ
-            }
+            if (selectionRect && !isInsideRect(cx, cy, selectionRect)) return;
             
             if (p.class === 's') countS++;
             else if (p.class === 'r') countR++;
@@ -270,7 +256,6 @@
         document.getElementById('countTotal').innerText = countS + countR + countW;
     }
 
-    // --- 範囲選択 (キャンバス操作) ---
     function toggleMode() {
         isSelectionMode = !isSelectionMode;
         if (isSelectionMode) {
@@ -357,9 +342,7 @@
 
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js')
-                .then(reg => console.log('SW registered!', reg))
-                .catch(err => console.log('SW registration failed', err));
+            navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW fail', err));
         }
     });
 </script>
