@@ -13,6 +13,8 @@
     <meta name="apple-mobile-web-app-title" content="樹頂点検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
     <style>
         body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
@@ -47,7 +49,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V3.1 (Cloud)</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V3.2 (Cloud)</h2>
     </div>
 
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
@@ -104,7 +106,7 @@
     
     let isSelectionMode = false;
     let isDrawing = false;
-    let selectionRect = null; // {x, y, w, h}
+    let selectionRect = null;
     let startPos = {x:0, y:0};
 
     // --- 画像読み込み ---
@@ -123,7 +125,6 @@
                 updateCounts();
                 btnDetect.disabled = false;
                 
-                // 画像読込後のメッセージもご希望のものに統一
                 statusMsg.innerText = "写真を選択・撮影して検知ボタンを押してください";
                 statusMsg.style.color = "#2e7d32";
             }
@@ -132,38 +133,40 @@
         reader.readAsDataURL(file);
     }
 
-    // --- クラウドAI検知 (REST API) ---
+    // --- クラウドAI検知 (Axios) ---
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.innerText = "⏳ クラウドで推論中...";
         btnDetect.disabled = true;
         
         try {
-            // 画像をBase64テキストに変換
             const tmpCanvas = document.createElement('canvas');
             tmpCanvas.width = imgElement.width;
             tmpCanvas.height = imgElement.height;
             const tmpCtx = tmpCanvas.getContext('2d');
             tmpCtx.drawImage(imgElement, 0, 0);
             
-            // JPEG品質0.8で圧縮して送信（通信量を抑える）
             const dataURL = tmpCanvas.toDataURL('image/jpeg', 0.8);
             const base64Image = dataURL.split(',')[1]; 
 
-            // Roboflowサーバーへ直接POST送信
-            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: base64Image
+            // ★変更：Axiosを使って通信し、キャッシュを回避する
+            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}`;
+            
+            const response = await axios({
+                method: "POST",
+                url: url,
+                params: {
+                    api_key: API_KEY,
+                    nocache: new Date().getTime() // 強制的にキャッシュを突破
+                },
+                data: base64Image,
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                }
             });
 
-            if (!response.ok) {
-                throw new Error(`サーバーエラー: ${response.status}`);
-            }
-
-            const data = await response.json();
-            predictionsData = data.predictions || [];
+            // Axiosは結果を .data の中に入れます
+            predictionsData = response.data.predictions || [];
             
             selectionRect = null;
             drawCanvas();
@@ -171,7 +174,7 @@
             
             btnDetect.innerText = "✅ 検知完了 (再実行)";
         } catch(e) {
-            alert("検知エラー: 通信環境を確認してください。\n" + e.message);
+            alert("検知エラー: 通信環境を確認してください。\n" + (e.message || e));
             btnDetect.innerText = "🚀 クラウドAI検知スタート";
             console.error(e);
         }
@@ -187,7 +190,6 @@
         
         predictionsData.forEach(p => {
             const boxColor = getColorForClass(p.class);
-            // REST APIの返り値は x, y が中心座標
             const cx = p.x;
             const cy = p.y;
             const w = p.width;
@@ -344,15 +346,22 @@
     canvas.addEventListener('touchend', endInteraction);
 
     // ==========================================
-    // 邪魔なService Workerを自動でクビにする処理
+    // 邪魔なService Workerを消し去る強力な処理
     // ==========================================
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
                 for(let registration of registrations) {
-                    registration.unregister(); // これで古い門番が消去されます
-                    console.log('Service Worker disabled.');
+                    registration.unregister().then(function(boolean) {
+                        console.log('Service Worker totally removed:', boolean);
+                    });
                 }
+            });
+        }
+        // 古いキャッシュストレージも念のため破壊
+        if ('caches' in window) {
+            caches.keys().then(function(names) {
+                for (let name of names) caches.delete(name);
             });
         }
     });
