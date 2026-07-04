@@ -13,6 +13,8 @@
     <meta name="apple-mobile-web-app-title" content="樹頂点検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
     <style>
         body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
@@ -24,14 +26,14 @@
         .btn-success { background: #2e7d32; color: white; }
         .btn-warning { background: #f57f17; color: white; }
         .btn-secondary { background: #6c757d; color: white; }
-        
         .btn:disabled { background: #bdbdbd; cursor: not-allowed; }
 
         .controls { display: flex; gap: 10px; margin-bottom: 10px; }
         .controls .btn { margin-bottom: 0; }
 
-        #canvas-container { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 250px; margin-bottom: 10px;}
-        canvas { max-width: 100%; height: auto; touch-action: none; }
+        #canvas-container { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 250px;}
+        /* 高さが広がりすぎないよう制限 */
+        canvas { max-width: 100%; max-height: 75vh; height: auto; touch-action: none; display: block; }
 
         .summary-box { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: #f1f8e9; padding: 10px; border-radius: 8px; font-weight: bold; font-size: 1.1em; color: #1b5e20; }
         .stat { display: flex; justify-content: space-between; padding: 5px 10px; background: white; border-radius: 6px; border: 1px solid #c5e1a5;}
@@ -40,58 +42,72 @@
         .stat-w { color: #616161; }
         .stat-total { color: #1565c0; grid-column: span 2; }
         
-        .mode-text { font-size: 0.85em; color: #d32f2f; margin-bottom: 5px; font-weight: bold; text-align: center;}
+        .mode-text { font-size: 0.85em; color: #d32f2f; margin-bottom: 10px; font-weight: bold; text-align: center;}
+
+        /* PCレイアウト用のCSS（画面幅900px以上で左右2カラムに） */
+        .main-layout { display: flex; flex-direction: column; gap: 15px; }
+        @media (min-width: 900px) {
+            .main-layout { flex-direction: row; align-items: flex-start; }
+            .left-panel { flex: 1; min-width: 0; }
+            .right-panel { flex: 0 0 350px; display: flex; flex-direction: column; gap: 15px; }
+            .right-panel .card { margin-bottom: 0; }
+            #canvas-container { min-height: 500px; }
+        }
     </style>
 </head>
 <body>
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V4.1</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V4.2 (Cloud API)</h2>
     </div>
-
-    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
-
-    <label class="btn btn-secondary" style="display:block;">
-        📸 写真を選択 / 撮影
-        <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
-    </label>
-
-    <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 クラウドAI検知スタート</button>
+    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
 
-<div class="card">
-    <div class="controls">
-        <button id="btnMode" class="btn btn-warning" onclick="toggleMode()">⬜ 範囲選択モード: OFF</button>
-        <button class="btn btn-secondary" onclick="resetSelection()">🔄 範囲リセット</button>
+<div class="main-layout">
+    <div class="left-panel">
+        <div class="card" style="margin-bottom:0; height:100%; display:flex; flex-direction:column;">
+            <div id="modeMessage" class="mode-text" style="display:none;">画像をタップして頂点を追加し、始点をタップして囲みを閉じます</div>
+            <div id="canvas-container" style="flex-grow:1;">
+                <canvas id="viewCanvas"></canvas>
+            </div>
+        </div>
     </div>
-    <div id="modeMessage" class="mode-text" style="display:none;">画像をドラッグしてカウント範囲を指定してください</div>
 
-    <div id="canvas-container">
-        <canvas id="viewCanvas"></canvas>
-    </div>
-</div>
+    <div class="right-panel">
+        <div class="card">
+            <label class="btn btn-secondary" style="display:block;">
+                📸 写真を選択 / 撮影
+                <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
+            </label>
+            <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 クラウドAI検知スタート</button>
+        </div>
 
-<div class="card">
-    <h3 style="margin-top:0; font-size: 1rem; color:#1b5e20;">📊 検知結果</h3>
-    <div class="summary-box">
-        <div class="stat stat-s"><span>スギ (s):</span> <span id="countS">0</span></div>
-        <div class="stat stat-r"><span>赤枯 (r):</span> <span id="countR">0</span></div>
-        <div class="stat stat-w"><span>枯死 (w):</span> <span id="countW">0</span></div>
-        <div class="stat stat-total"><span>合計:</span> <span id="countTotal">0</span></div>
+        <div class="card">
+            <div class="controls">
+                <button id="btnMode" class="btn btn-warning" onclick="toggleMode()">⬡ 多角形モード: OFF</button>
+                <button class="btn btn-secondary" onclick="resetSelection()">🔄 範囲リセット</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0; font-size: 1rem; color:#1b5e20;">📊 検知結果</h3>
+            <div class="summary-box">
+                <div class="stat stat-s"><span>スギ (s):</span> <span id="countS">0</span></div>
+                <div class="stat stat-r"><span>赤枯 (r):</span> <span id="countR">0</span></div>
+                <div class="stat stat-w"><span>枯死 (w):</span> <span id="countW">0</span></div>
+                <div class="stat stat-total"><span>合計:</span> <span id="countTotal">0</span></div>
+            </div>
+        </div>
     </div>
 </div>
 
 <script>
     // ==========================================
-    // API設定 (Cloud REST API用)
+    // API設定
     // ==========================================
-    // ★ プロジェクト名はシンプルに戻します
     const PROJECT_NAME = "treetopcount"; 
-    
-    // ★ ここにRoboflowの「Private API Key（WgeE...など）」を貼り付けてください！
     const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
-    
     const MODEL_VERSION = 2;
     // ==========================================
 
@@ -106,9 +122,9 @@
     const statusMsg = document.getElementById('statusMsg');
     
     let isSelectionMode = false;
-    let isDrawing = false;
-    let selectionRect = null;
-    let startPos = {x:0, y:0};
+    let polygonPoints = [];
+    let mousePos = null;
+    let isPolygonClosed = false;
 
     function loadImage(event) {
         const file = event.target.files[0];
@@ -121,7 +137,7 @@
                 canvas.height = imgElement.height;
                 ctx.drawImage(imgElement, 0, 0);
                 predictionsData = [];
-                selectionRect = null;
+                resetSelection();
                 updateCounts();
                 btnDetect.disabled = false;
                 
@@ -150,7 +166,6 @@
             const formData = new FormData();
             formData.append("file", blob, "image.jpg");
 
-            // URL組み立て
             const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
             
             const response = await fetch(url, {
@@ -166,7 +181,6 @@
             const data = await response.json();
             predictionsData = data.predictions || [];
             
-            selectionRect = null;
             drawCanvas();
             updateCounts();
             
@@ -195,8 +209,8 @@
             const y = cy - h / 2;
             
             let alpha = 1.0;
-            if (selectionRect) {
-                if (!isInsideRect(cx, cy, selectionRect)) {
+            if (isPolygonClosed && polygonPoints.length >= 3) {
+                if (!isInsidePolygon(cx, cy, polygonPoints)) {
                     alpha = 0.2;
                 }
             }
@@ -219,15 +233,37 @@
         
         ctx.globalAlpha = 1.0;
 
-        if (selectionRect) {
+        // 多角形の描画
+        if (polygonPoints.length > 0) {
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
+            
+            ctx.beginPath();
+            ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+            for(let i = 1; i < polygonPoints.length; i++) {
+                ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+            }
+            
+            if (isPolygonClosed) {
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
+                ctx.fill();
+            } else if (mousePos) {
+                ctx.lineTo(mousePos.x, mousePos.y); // マウス追従線
+            }
+            
             ctx.setLineDash([10, 10]);
-            ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
+            ctx.stroke();
             ctx.setLineDash([]);
             
-            ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
-            ctx.fillRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
+            // 頂点の目印を描画（始点だけ少し大きく）
+            polygonPoints.forEach((pt, index) => {
+                ctx.beginPath();
+                const radius = (index === 0 && !isPolygonClosed) ? Math.max(8, canvas.width/200) : Math.max(4, canvas.width/400);
+                ctx.arc(pt.x, pt.y, radius, 0, 2*Math.PI);
+                ctx.fillStyle = (index === 0 && !isPolygonClosed) ? 'rgba(245, 127, 23, 0.8)' : '#f57f17';
+                ctx.fill();
+            });
         }
     }
 
@@ -245,7 +281,10 @@
             const cx = p.x;
             const cy = p.y;
             
-            if (selectionRect && !isInsideRect(cx, cy, selectionRect)) return;
+            // 多角形が閉じられている場合のみフィルタリング
+            if (isPolygonClosed && polygonPoints.length >= 3) {
+                if (!isInsidePolygon(cx, cy, polygonPoints)) return;
+            }
             
             if (p.class === 's') countS++;
             else if (p.class === 'r') countR++;
@@ -261,12 +300,12 @@
     function toggleMode() {
         isSelectionMode = !isSelectionMode;
         if (isSelectionMode) {
-            btnMode.innerText = "🟨 範囲選択モード: ON";
+            btnMode.innerText = "⬡ 多角形モード: ON";
             btnMode.classList.remove('btn-warning');
             btnMode.classList.add('btn-primary');
             document.getElementById('modeMessage').style.display = 'block';
         } else {
-            btnMode.innerText = "⬜ 範囲選択モード: OFF";
+            btnMode.innerText = "⬜ 多角形モード: OFF";
             btnMode.classList.add('btn-warning');
             btnMode.classList.remove('btn-primary');
             document.getElementById('modeMessage').style.display = 'none';
@@ -274,7 +313,9 @@
     }
 
     function resetSelection() {
-        selectionRect = null;
+        polygonPoints = [];
+        isPolygonClosed = false;
+        mousePos = null;
         drawCanvas();
         updateCounts();
     }
@@ -298,50 +339,64 @@
         };
     }
 
-    function isInsideRect(x, y, rect) {
-        const rx = Math.min(rect.x, rect.x + rect.w);
-        const ry = Math.min(rect.y, rect.y + rect.h);
-        const rw = Math.abs(rect.w);
-        const rh = Math.abs(rect.h);
-        
-        return (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh);
+    // 多角形の内外判定アルゴリズム (Ray-casting)
+    function isInsidePolygon(x, y, points) {
+        let isInside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+            let xi = points[i].x, yi = points[i].y;
+            let xj = points[j].x, yj = points[j].y;
+            let intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            if (intersect) isInside = !isInside;
+        }
+        return isInside;
     }
 
-    const startInteraction = (e) => {
+    // クリック（タップ）での多角形描画処理
+    canvas.addEventListener('click', (e) => {
         if (!isSelectionMode || !imgElement.src) return;
-        e.preventDefault(); 
-        isDrawing = true;
-        startPos = getMousePos(e);
-        selectionRect = { x: startPos.x, y: startPos.y, w: 0, h: 0 };
-    };
-
-    const moveInteraction = (e) => {
-        if (!isDrawing) return;
-        e.preventDefault();
-        const currentPos = getMousePos(e);
-        selectionRect.w = currentPos.x - startPos.x;
-        selectionRect.h = currentPos.y - startPos.y;
-        drawCanvas();
-    };
-
-    const endInteraction = (e) => {
-        if (!isDrawing) return;
-        isDrawing = false;
-        if (Math.abs(selectionRect.w) < 10 || Math.abs(selectionRect.h) < 10) {
-            selectionRect = null;
+        
+        const pt = getMousePos(e);
+        
+        if (isPolygonClosed) {
+            // 既に閉じている場合はリセットして新しく始める
+            polygonPoints = [pt];
+            isPolygonClosed = false;
+        } else {
+            // 3点以上打たれていて、始点近くをクリックしたら閉じる
+            if (polygonPoints.length >= 3) {
+                const dx = pt.x - polygonPoints[0].x;
+                const dy = pt.y - polygonPoints[0].y;
+                // スマホやPCの描画スケールに合わせて判定範囲を調整
+                const hitRadius = 30 * (canvas.width / canvas.getBoundingClientRect().width); 
+                
+                if (Math.sqrt(dx*dx + dy*dy) < hitRadius) {
+                    isPolygonClosed = true;
+                    drawCanvas();
+                    updateCounts();
+                    return;
+                }
+            }
+            polygonPoints.push(pt);
         }
         drawCanvas();
-        updateCounts();
-    };
+    });
 
-    canvas.addEventListener('mousedown', startInteraction);
-    canvas.addEventListener('mousemove', moveInteraction);
-    canvas.addEventListener('mouseup', endInteraction);
-    canvas.addEventListener('mouseout', endInteraction);
-    canvas.addEventListener('touchstart', startInteraction, {passive: false});
-    canvas.addEventListener('touchmove', moveInteraction, {passive: false});
-    canvas.addEventListener('touchend', endInteraction);
+    // マウスカーソルへの追従線（PC向け）
+    canvas.addEventListener('mousemove', (e) => {
+        if (!isSelectionMode || isPolygonClosed || polygonPoints.length === 0) return;
+        mousePos = getMousePos(e);
+        drawCanvas();
+    });
 
+    window.addEventListener('load', () => {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister(); 
+                }
+            });
+        }
+    });
 </script>
 </body>
 </html>
