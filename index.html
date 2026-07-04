@@ -13,8 +13,6 @@
     <meta name="apple-mobile-web-app-title" content="樹頂点検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-
     <style>
         body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
@@ -49,7 +47,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V3.3 (Cloud)</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V4.0 (Cloud API)</h2>
     </div>
 
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 10px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
@@ -88,7 +86,7 @@
     // ==========================================
     // API設定 (Cloud REST API用)
     // ==========================================
-    const PROJECT_NAME = "manabus-workspace/treetopcount"; // ← 修正！
+    const PROJECT_NAME = "manabus-workspace/treetopcount"; 
     const API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2";
     const MODEL_VERSION = 2;
     // ==========================================
@@ -131,37 +129,44 @@
         reader.readAsDataURL(file);
     }
 
+    // --- クラウドAI検知 (FormData方式に変更) ---
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.innerText = "⏳ クラウドで推論中...";
         btnDetect.disabled = true;
         
         try {
+            // キャンバスから直接Blob（バイナリ画像データ）を作成する処理
             const tmpCanvas = document.createElement('canvas');
             tmpCanvas.width = imgElement.width;
             tmpCanvas.height = imgElement.height;
             const tmpCtx = tmpCanvas.getContext('2d');
             tmpCtx.drawImage(imgElement, 0, 0);
-            
-            const dataURL = tmpCanvas.toDataURL('image/jpeg', 0.8);
-            const base64Image = dataURL.split(',')[1]; 
 
-            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}`;
+            // Blob化の完了を待つPromiseを作成
+            const blob = await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+
+            // FormDataを作成し、ファイルを添付するように送信データを組み立てる
+            const formData = new FormData();
+            formData.append("file", blob, "image.jpg");
+
+            // URL組み立て（キャッシュ対策のタイムスタンプ付き）
+            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}&nocache=${new Date().getTime()}`;
             
-            const response = await axios({
-                method: "POST",
-                url: url,
-                params: {
-                    api_key: API_KEY,
-                    nocache: new Date().getTime()
-                },
-                data: base64Image,
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                }
+            // fetchを使って、画像ファイルとしてPOST送信する
+            const response = await fetch(url, {
+                method: 'POST',
+                // ※FormDataを送信する場合、Content-Typeはブラウザに自動設定させるため記載しない
+                body: formData
             });
 
-            predictionsData = response.data.predictions || [];
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`HTTP ${response.status}: ${errText}`);
+            }
+
+            const data = await response.json();
+            predictionsData = data.predictions || [];
             
             selectionRect = null;
             drawCanvas();
@@ -169,7 +174,7 @@
             
             btnDetect.innerText = "✅ 検知完了 (再実行)";
         } catch(e) {
-            alert("検知エラー: 権限または通信環境を確認してください。\n" + (e.message || e));
+            alert("検知エラー: 通信が弾かれました。\n" + e.message);
             btnDetect.innerText = "🚀 クラウドAI検知スタート";
             console.error(e);
         }
@@ -339,15 +344,6 @@
     canvas.addEventListener('touchmove', moveInteraction, {passive: false});
     canvas.addEventListener('touchend', endInteraction);
 
-    window.addEventListener('load', () => {
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(function(registrations) {
-                for(let registration of registrations) {
-                    registration.unregister(); 
-                }
-            });
-        }
-    });
 </script>
 </body>
 </html>
