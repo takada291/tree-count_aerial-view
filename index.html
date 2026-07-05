@@ -13,8 +13,6 @@
     <meta name="apple-mobile-web-app-title" content="樹頂点検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-
     <style>
         body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
@@ -26,25 +24,26 @@
         .btn-success { background: #2e7d32; color: white; }
         .btn-warning { background: #f57f17; color: white; }
         .btn-secondary { background: #6c757d; color: white; }
+        
         .btn:disabled { background: #bdbdbd; cursor: not-allowed; }
 
         .controls { display: flex; gap: 10px; margin-bottom: 10px; }
         .controls .btn { margin-bottom: 0; }
 
         #canvas-container { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 250px;}
-        /* 高さが広がりすぎないよう制限 */
         canvas { max-width: 100%; max-height: 75vh; height: auto; touch-action: none; display: block; }
 
         .summary-box { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: #f1f8e9; padding: 10px; border-radius: 8px; font-weight: bold; font-size: 1.1em; color: #1b5e20; }
         .stat { display: flex; justify-content: space-between; padding: 5px 10px; background: white; border-radius: 6px; border: 1px solid #c5e1a5;}
         .stat-s { color: #2e7d32; }
+        .stat-h { color: #00838f; } /* ヒノキ用の色 */
         .stat-r { color: #c62828; }
         .stat-w { color: #616161; }
         .stat-total { color: #1565c0; grid-column: span 2; }
         
         .mode-text { font-size: 0.85em; color: #d32f2f; margin-bottom: 10px; font-weight: bold; text-align: center;}
 
-        /* PCレイアウト用のCSS（画面幅900px以上で左右2カラムに） */
+        /* PCレイアウト用のCSS */
         .main-layout { display: flex; flex-direction: column; gap: 15px; }
         @media (min-width: 900px) {
             .main-layout { flex-direction: row; align-items: flex-start; }
@@ -59,7 +58,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V4.2 (Cloud API)</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V4.3</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -94,6 +93,7 @@
             <h3 style="margin-top:0; font-size: 1rem; color:#1b5e20;">📊 検知結果</h3>
             <div class="summary-box">
                 <div class="stat stat-s"><span>スギ (s):</span> <span id="countS">0</span></div>
+                <div class="stat stat-h"><span>ヒノキ (h):</span> <span id="countH">0</span></div>
                 <div class="stat stat-r"><span>赤枯 (r):</span> <span id="countR">0</span></div>
                 <div class="stat stat-w"><span>枯死 (w):</span> <span id="countW">0</span></div>
                 <div class="stat stat-total"><span>合計:</span> <span id="countTotal">0</span></div>
@@ -104,11 +104,11 @@
 
 <script>
     // ==========================================
-    // API設定
+    // API設定 (Cloud REST API用)
     // ==========================================
     const PROJECT_NAME = "treetopcount"; 
     const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
-    const MODEL_VERSION = 3;
+    const MODEL_VERSION = 2;
     // ==========================================
 
     let imgElement = new Image();
@@ -122,6 +122,8 @@
     const statusMsg = document.getElementById('statusMsg');
     
     let isSelectionMode = false;
+    let isDrawing = false;
+    let selectionRect = null;
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
@@ -149,37 +151,104 @@
         reader.readAsDataURL(file);
     }
 
+    // 汎用的な推論フェッチ関数
+    async function fetchPredictionsFromBlob(blob) {
+        const formData = new FormData();
+        formData.append("file", blob, "image.jpg");
+        const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errText}`);
+        }
+        const data = await response.json();
+        return data.predictions || [];
+    }
+
+    // IoU (Intersection over Union) の計算
+    function calculateIoU(box1, box2) {
+        const x1 = Math.max(box1.x - box1.width / 2, box2.x - box2.width / 2);
+        const y1 = Math.max(box1.y - box1.height / 2, box2.y - box2.height / 2);
+        const x2 = Math.min(box1.x + box1.width / 2, box2.x + box2.width / 2);
+        const y2 = Math.min(box1.y + box1.height / 2, box2.y + box2.height / 2);
+
+        if (x2 <= x1 || y2 <= y1) return 0.0;
+
+        const intersectionArea = (x2 - x1) * (y2 - y1);
+        const box1Area = box1.width * box1.height;
+        const box2Area = box2.width * box2.height;
+        const unionArea = box1Area + box2Area - intersectionArea;
+
+        return intersectionArea / unionArea;
+    }
+
+    // 2つの検知結果（オリジナルと反転）をマージする関数 (NMS)
+    function mergePredictions(preds1, preds2, iouThreshold = 0.4) {
+        let combined = [...preds1];
+        
+        for (let p2 of preds2) {
+            let isDuplicate = false;
+            for (let i = 0; i < combined.length; i++) {
+                let p1 = combined[i];
+                // 同じクラスで重なり（IoU）が閾値以上なら同じ木とみなす
+                if (p1.class === p2.class && calculateIoU(p1, p2) > iouThreshold) {
+                    // 自信度（confidence）が高い方を採用
+                    if (p2.confidence > p1.confidence) {
+                        combined[i] = p2; 
+                    }
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                combined.push(p2);
+            }
+        }
+        return combined;
+    }
+
     async function runDetection() {
         if(!imgElement.src) return;
-        btnDetect.innerText = "⏳ クラウドで推論中...";
         btnDetect.disabled = true;
         
         try {
+            // ① 元画像の推論
+            btnDetect.innerText = "⏳ クラウドで推論中... (1/2)";
             const tmpCanvas = document.createElement('canvas');
             tmpCanvas.width = imgElement.width;
             tmpCanvas.height = imgElement.height;
             const tmpCtx = tmpCanvas.getContext('2d');
             tmpCtx.drawImage(imgElement, 0, 0);
+            const blobOriginal = await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+            const originalPreds = await fetchPredictionsFromBlob(blobOriginal);
 
-            const blob = await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+            // ② 左右反転画像の推論 (TTA: Test-Time Augmentation)
+            btnDetect.innerText = "⏳ 反転画像で精度向上中... (2/2)";
+            const flipCanvas = document.createElement('canvas');
+            flipCanvas.width = imgElement.width;
+            flipCanvas.height = imgElement.height;
+            const flipCtx = flipCanvas.getContext('2d');
+            flipCtx.translate(flipCanvas.width, 0);
+            flipCtx.scale(-1, 1);
+            flipCtx.drawImage(imgElement, 0, 0);
+            const blobFlipped = await new Promise(resolve => flipCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+            const flippedPredsRaw = await fetchPredictionsFromBlob(blobFlipped);
 
-            const formData = new FormData();
-            formData.append("file", blob, "image.jpg");
-
-            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
-            
-            const response = await fetch(url, {
-                method: 'POST',
-                body: formData
+            // 左右反転された座標を元の画像座標に戻す
+            const revertedFlippedPreds = flippedPredsRaw.map(p => {
+                return {
+                    ...p,
+                    x: imgElement.width - p.x // X座標を反転し直す
+                };
             });
 
-            if (!response.ok) {
-                const errText = await response.text();
-                throw new Error(`HTTP ${response.status}: ${errText}`);
-            }
-
-            const data = await response.json();
-            predictionsData = data.predictions || [];
+            // ③ 両方の結果をガッチャンコ（重複を除外）
+            predictionsData = mergePredictions(originalPreds, revertedFlippedPreds, 0.4);
             
             drawCanvas();
             updateCounts();
@@ -224,7 +293,8 @@
             const fontSize = Math.max(12, canvas.width / 60);
             ctx.font = `bold ${fontSize}px Arial`;
             
-            const text = `${p.class} ${Math.round(p.confidence*100)}%`;
+            // ★変更：パーセントを非表示にし、クラス名のみにする
+            const text = `${p.class}`;
             const textWidth = ctx.measureText(text).width;
             ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
             ctx.fillStyle = '#FFFFFF';
@@ -249,14 +319,13 @@
                 ctx.fillStyle = 'rgba(245, 127, 23, 0.2)';
                 ctx.fill();
             } else if (mousePos) {
-                ctx.lineTo(mousePos.x, mousePos.y); // マウス追従線
+                ctx.lineTo(mousePos.x, mousePos.y); 
             }
             
             ctx.setLineDash([10, 10]);
             ctx.stroke();
             ctx.setLineDash([]);
             
-            // 頂点の目印を描画（始点だけ少し大きく）
             polygonPoints.forEach((pt, index) => {
                 ctx.beginPath();
                 const radius = (index === 0 && !isPolygonClosed) ? Math.max(8, canvas.width/200) : Math.max(4, canvas.width/400);
@@ -268,33 +337,35 @@
     }
 
     function getColorForClass(className) {
-        if (className === 's') return '#2e7d32'; 
-        if (className === 'r') return '#c62828'; 
-        if (className === 'w') return '#616161'; 
+        if (className === 's') return '#2e7d32'; // スギ
+        if (className === 'h') return '#00838f'; // ヒノキ
+        if (className === 'r') return '#c62828'; // 赤枯
+        if (className === 'w') return '#616161'; // 枯死
         return '#1565c0'; 
     }
 
     function updateCounts() {
-        let countS = 0, countR = 0, countW = 0;
+        let countS = 0, countH = 0, countR = 0, countW = 0;
         
         predictionsData.forEach(p => {
             const cx = p.x;
             const cy = p.y;
             
-            // 多角形が閉じられている場合のみフィルタリング
             if (isPolygonClosed && polygonPoints.length >= 3) {
                 if (!isInsidePolygon(cx, cy, polygonPoints)) return;
             }
             
             if (p.class === 's') countS++;
+            else if (p.class === 'h') countH++;
             else if (p.class === 'r') countR++;
             else if (p.class === 'w') countW++;
         });
 
         document.getElementById('countS').innerText = countS;
+        document.getElementById('countH').innerText = countH;
         document.getElementById('countR').innerText = countR;
         document.getElementById('countW').innerText = countW;
-        document.getElementById('countTotal').innerText = countS + countR + countW;
+        document.getElementById('countTotal').innerText = countS + countH + countR + countW;
     }
 
     function toggleMode() {
@@ -339,7 +410,6 @@
         };
     }
 
-    // 多角形の内外判定アルゴリズム (Ray-casting)
     function isInsidePolygon(x, y, points) {
         let isInside = false;
         for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -351,22 +421,18 @@
         return isInside;
     }
 
-    // クリック（タップ）での多角形描画処理
     canvas.addEventListener('click', (e) => {
         if (!isSelectionMode || !imgElement.src) return;
         
         const pt = getMousePos(e);
         
         if (isPolygonClosed) {
-            // 既に閉じている場合はリセットして新しく始める
             polygonPoints = [pt];
             isPolygonClosed = false;
         } else {
-            // 3点以上打たれていて、始点近くをクリックしたら閉じる
             if (polygonPoints.length >= 3) {
                 const dx = pt.x - polygonPoints[0].x;
                 const dy = pt.y - polygonPoints[0].y;
-                // スマホやPCの描画スケールに合わせて判定範囲を調整
                 const hitRadius = 30 * (canvas.width / canvas.getBoundingClientRect().width); 
                 
                 if (Math.sqrt(dx*dx + dy*dy) < hitRadius) {
@@ -381,7 +447,6 @@
         drawCanvas();
     });
 
-    // マウスカーソルへの追従線（PC向け）
     canvas.addEventListener('mousemove', (e) => {
         if (!isSelectionMode || isPolygonClosed || polygonPoints.length === 0) return;
         mousePos = getMousePos(e);
