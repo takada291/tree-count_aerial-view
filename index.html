@@ -58,7 +58,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V0.7.1</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V0.7.2</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -122,7 +122,6 @@
     const statusMsg = document.getElementById('statusMsg');
     
     let isSelectionMode = false;
-    let selectionRect = null;
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
@@ -169,24 +168,27 @@
         return data.predictions || [];
     }
 
-    // 画像の反転・明暗を適用してBlobを生成する関数
+    // ★ 改良：スマホでの画質劣化を防ぐため、100%の時はフィルターを通さない
     async function getVariationBlob(img, flip, brightness) {
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = img.width;
         tmpCanvas.height = img.height;
         const tmpCtx = tmpCanvas.getContext('2d');
 
-        // CSSフィルターで明るさを変更
-        tmpCtx.filter = `brightness(${brightness}%)`;
+        if (brightness !== 100) {
+            tmpCtx.filter = `brightness(${brightness}%)`;
+        }
 
-        // 左右反転の適用
         if (flip) {
             tmpCtx.translate(tmpCanvas.width, 0);
             tmpCtx.scale(-1, 1);
         }
 
         tmpCtx.drawImage(img, 0, 0);
-        tmpCtx.filter = 'none'; // リセット
+        
+        if (brightness !== 100) {
+            tmpCtx.filter = 'none'; 
+        }
 
         return await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
     }
@@ -208,27 +210,27 @@
         return intersectionArea / unionArea;
     }
 
-    // 2つの検知結果をマージする関数 (NMS)
-    function mergePredictions(preds1, preds2, iouThreshold = 0.4) {
-        let combined = [...preds1];
-        
-        for (let p2 of preds2) {
+    // ★ 改良：プロ仕様の NMS (Non-Maximum Suppression) アルゴリズム
+    // 全部の結果を混ぜてから、自信度が高い順に整理して重複を弾き飛ばします
+    function applyNMS(allPredictions, iouThreshold = 0.4) {
+        // 自信度（confidence）が高い順に並び替え
+        const sorted = allPredictions.sort((a, b) => b.confidence - a.confidence);
+        const picked = [];
+
+        for (const current of sorted) {
             let isDuplicate = false;
-            for (let i = 0; i < combined.length; i++) {
-                let p1 = combined[i];
-                if (p1.class === p2.class && calculateIoU(p1, p2) > iouThreshold) {
-                    if (p2.confidence > p1.confidence) {
-                        combined[i] = p2; 
-                    }
+            for (const pickedBox of picked) {
+                // 同じクラスで、重なり具合が閾値を超えていれば「同じ木」と判定して除外
+                if (current.class === pickedBox.class && calculateIoU(current, pickedBox) > iouThreshold) {
                     isDuplicate = true;
                     break;
                 }
             }
             if (!isDuplicate) {
-                combined.push(p2);
+                picked.push(current);
             }
         }
-        return combined;
+        return picked;
     }
 
     // --- メイン推論処理（6回ループ） ---
@@ -236,7 +238,6 @@
         if(!imgElement.src) return;
         btnDetect.disabled = true;
         
-        // 推論のバリエーション定義 (計6パターン)
         const variations = [
             { flip: false, brightness: 100, label: "標準" },
             { flip: true,  brightness: 100, label: "反転" },
@@ -246,18 +247,17 @@
             { flip: true,  brightness:  70, label: "反転+暗" }
         ];
 
-        let allMergedPredictions = [];
+        let allRawPredictions = []; // すべての結果を放り込む巨大な箱
 
         try {
             for (let i = 0; i < variations.length; i++) {
                 const v = variations[i];
                 btnDetect.innerText = `⏳ 推論中... (${i+1}/6) [${v.label}]`;
                 
-                // 画像加工と送信
                 const blob = await getVariationBlob(imgElement, v.flip, v.brightness);
                 const rawPreds = await fetchPredictionsFromBlob(blob);
 
-                // 反転した場合は座標を元に戻す
+                // 座標の調整（反転戻し）
                 const adjustedPreds = rawPreds.map(p => {
                     return {
                         ...p,
@@ -265,15 +265,12 @@
                     };
                 });
 
-                // 結果をガッチャンコ
-                if (i === 0) {
-                    allMergedPredictions = adjustedPreds;
-                } else {
-                    allMergedPredictions = mergePredictions(allMergedPredictions, adjustedPreds, 0.4);
-                }
+                // 一旦すべての結果を巨大な箱に追加
+                allRawPredictions.push(...adjustedPreds);
             }
 
-            predictionsData = allMergedPredictions;
+            // ★ ここでNMSを使って一気にガッチャンコ（重複排除）
+            predictionsData = applyNMS(allRawPredictions, 0.4);
             
             drawCanvas();
             updateCounts();
@@ -318,7 +315,6 @@
             const fontSize = Math.max(12, canvas.width / 60);
             ctx.font = `bold ${fontSize}px Arial`;
             
-            // クラス名のみ表示
             const text = `${p.class}`;
             const textWidth = ctx.measureText(text).width;
             ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
@@ -328,7 +324,6 @@
         
         ctx.globalAlpha = 1.0;
 
-        // 多角形の描画
         if (polygonPoints.length > 0) {
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
@@ -362,10 +357,10 @@
     }
 
     function getColorForClass(className) {
-        if (className === 's') return '#2e7d32'; // スギ
-        if (className === 'h') return '#00838f'; // ヒノキ
-        if (className === 'r') return '#c62828'; // 赤枯
-        if (className === 'w') return '#616161'; // 枯死
+        if (className === 's') return '#2e7d32'; 
+        if (className === 'h') return '#00838f'; 
+        if (className === 'r') return '#c62828'; 
+        if (className === 'w') return '#616161'; 
         return '#1565c0'; 
     }
 
