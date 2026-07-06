@@ -209,24 +209,27 @@
         return intersectionArea / unionArea;
     }
 
-    // ★ 修正箇所：重なり許容度（iouThreshold）を 0.4 から 0.75 へ大幅引き上げ
-    function applyNMS(allPredictions, iouThreshold = 0.75) {
-        const sorted = allPredictions.sort((a, b) => b.confidence - a.confidence);
-        const picked = [];
+    // ★ 改良：絶対に減らない「ボーナス追加方式」
+    // basePreds: 既に確定した木のリスト (絶対に消さない)
+    // newPreds: 今回の推論で見つかった木のリスト
+    function mergeNewPredictions(basePreds, newPreds, iouThreshold = 0.45) {
+        let combined = [...basePreds];
 
-        for (const current of sorted) {
+        for (let newBox of newPreds) {
             let isDuplicate = false;
-            for (const pickedBox of picked) {
-                if (current.class === pickedBox.class && calculateIoU(current, pickedBox) > iouThreshold) {
+            for (let baseBox of combined) {
+                // 重なりが45%以上なら「既に検知済みの木」とみなして無視する
+                if (newBox.class === baseBox.class && calculateIoU(newBox, baseBox) > iouThreshold) {
                     isDuplicate = true;
                     break;
                 }
             }
+            // どの既存の木とも重ならなかった場合のみ「新発見の木（ボーナス）」として追加！
             if (!isDuplicate) {
-                picked.push(current);
+                combined.push(newBox);
             }
         }
-        return picked;
+        return combined;
     }
 
     async function runDetection() {
@@ -242,7 +245,7 @@
             { flip: true,  brightness:  70, label: "反転+暗" }
         ];
 
-        let allRawPredictions = []; 
+        let finalPredictions = []; 
 
         try {
             for (let i = 0; i < variations.length; i++) {
@@ -259,11 +262,16 @@
                     };
                 });
 
-                allRawPredictions.push(...adjustedPreds);
+                if (i === 0) {
+                    // ★ 1回目の標準推論は「絶対的なベース」として全て採用！
+                    finalPredictions = [...adjustedPreds];
+                } else {
+                    // ★ 2回目以降は、新しい木だけをボーナスとして追加していく！
+                    finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
+                }
             }
 
-            // ★ NMS実行（閾値0.75で厳しく判定）
-            predictionsData = applyNMS(allRawPredictions, 0.75);
+            predictionsData = finalPredictions;
             
             drawCanvas();
             updateCounts();
