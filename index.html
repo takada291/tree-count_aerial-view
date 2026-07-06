@@ -36,7 +36,7 @@
         .summary-box { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; background: #f1f8e9; padding: 10px; border-radius: 8px; font-weight: bold; font-size: 1.1em; color: #1b5e20; }
         .stat { display: flex; justify-content: space-between; padding: 5px 10px; background: white; border-radius: 6px; border: 1px solid #c5e1a5;}
         .stat-s { color: #2e7d32; }
-        .stat-h { color: #00838f; } 
+        .stat-h { color: #00838f; } /* ヒノキ用の色 */
         .stat-r { color: #c62828; }
         .stat-w { color: #616161; }
         .stat-total { color: #1565c0; grid-column: span 2; }
@@ -58,7 +58,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V0.7.4</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V0.7</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -104,7 +104,7 @@
 
 <script>
     // ==========================================
-    // API設定
+    // API設定 (Cloud REST API用)
     // ==========================================
     const PROJECT_NAME = "treetopcount"; 
     const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
@@ -122,6 +122,8 @@
     const statusMsg = document.getElementById('statusMsg');
     
     let isSelectionMode = false;
+    let isDrawing = false;
+    let selectionRect = null;
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
@@ -168,30 +170,6 @@
         return data.predictions || [];
     }
 
-    async function getVariationBlob(img, flip, brightness) {
-        const tmpCanvas = document.createElement('canvas');
-        tmpCanvas.width = img.width;
-        tmpCanvas.height = img.height;
-        const tmpCtx = tmpCanvas.getContext('2d');
-
-        if (brightness !== 100) {
-            tmpCtx.filter = `brightness(${brightness}%)`;
-        }
-
-        if (flip) {
-            tmpCtx.translate(tmpCanvas.width, 0);
-            tmpCtx.scale(-1, 1);
-        }
-
-        tmpCtx.drawImage(img, 0, 0);
-        
-        if (brightness !== 100) {
-            tmpCtx.filter = 'none'; 
-        }
-
-        return await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
-    }
-
     // IoU (Intersection over Union) の計算
     function calculateIoU(box1, box2) {
         const x1 = Math.max(box1.x - box1.width / 2, box2.x - box2.width / 2);
@@ -209,24 +187,26 @@
         return intersectionArea / unionArea;
     }
 
-    // ★ 改良：絶対に減らない「ボーナス追加方式」
-    // basePreds: 既に確定した木のリスト (絶対に消さない)
-    // newPreds: 今回の推論で見つかった木のリスト
-    function mergeNewPredictions(basePreds, newPreds, iouThreshold = 0.45) {
-        let combined = [...basePreds];
-
-        for (let newBox of newPreds) {
+    // 2つの検知結果（オリジナルと反転）をマージする関数 (NMS)
+    function mergePredictions(preds1, preds2, iouThreshold = 0.4) {
+        let combined = [...preds1];
+        
+        for (let p2 of preds2) {
             let isDuplicate = false;
-            for (let baseBox of combined) {
-                // 重なりが45%以上なら「既に検知済みの木」とみなして無視する
-                if (newBox.class === baseBox.class && calculateIoU(newBox, baseBox) > iouThreshold) {
+            for (let i = 0; i < combined.length; i++) {
+                let p1 = combined[i];
+                // 同じクラスで重なり（IoU）が閾値以上なら同じ木とみなす
+                if (p1.class === p2.class && calculateIoU(p1, p2) > iouThreshold) {
+                    // 自信度（confidence）が高い方を採用
+                    if (p2.confidence > p1.confidence) {
+                        combined[i] = p2; 
+                    }
                     isDuplicate = true;
                     break;
                 }
             }
-            // どの既存の木とも重ならなかった場合のみ「新発見の木（ボーナス）」として追加！
             if (!isDuplicate) {
-                combined.push(newBox);
+                combined.push(p2);
             }
         }
         return combined;
@@ -236,42 +216,39 @@
         if(!imgElement.src) return;
         btnDetect.disabled = true;
         
-        const variations = [
-            { flip: false, brightness: 100, label: "標準" },
-            { flip: true,  brightness: 100, label: "反転" },
-            { flip: false, brightness: 130, label: "明(130%)" },
-            { flip: true,  brightness: 130, label: "反転+明" },
-            { flip: false, brightness:  70, label: "暗(70%)" },
-            { flip: true,  brightness:  70, label: "反転+暗" }
-        ];
-
-        let finalPredictions = []; 
-
         try {
-            for (let i = 0; i < variations.length; i++) {
-                const v = variations[i];
-                btnDetect.innerText = `⏳ 推論中... (${i+1}/6) [${v.label}]`;
-                
-                const blob = await getVariationBlob(imgElement, v.flip, v.brightness);
-                const rawPreds = await fetchPredictionsFromBlob(blob);
+            // ① 元画像の推論
+            btnDetect.innerText = "⏳ クラウドで推論中... (1/2)";
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = imgElement.width;
+            tmpCanvas.height = imgElement.height;
+            const tmpCtx = tmpCanvas.getContext('2d');
+            tmpCtx.drawImage(imgElement, 0, 0);
+            const blobOriginal = await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+            const originalPreds = await fetchPredictionsFromBlob(blobOriginal);
 
-                const adjustedPreds = rawPreds.map(p => {
-                    return {
-                        ...p,
-                        x: v.flip ? imgElement.width - p.x : p.x
-                    };
-                });
+            // ② 左右反転画像の推論 (TTA: Test-Time Augmentation)
+            btnDetect.innerText = "⏳ 反転画像で精度向上中... (2/2)";
+            const flipCanvas = document.createElement('canvas');
+            flipCanvas.width = imgElement.width;
+            flipCanvas.height = imgElement.height;
+            const flipCtx = flipCanvas.getContext('2d');
+            flipCtx.translate(flipCanvas.width, 0);
+            flipCtx.scale(-1, 1);
+            flipCtx.drawImage(imgElement, 0, 0);
+            const blobFlipped = await new Promise(resolve => flipCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+            const flippedPredsRaw = await fetchPredictionsFromBlob(blobFlipped);
 
-                if (i === 0) {
-                    // ★ 1回目の標準推論は「絶対的なベース」として全て採用！
-                    finalPredictions = [...adjustedPreds];
-                } else {
-                    // ★ 2回目以降は、新しい木だけをボーナスとして追加していく！
-                    finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
-                }
-            }
+            // 左右反転された座標を元の画像座標に戻す
+            const revertedFlippedPreds = flippedPredsRaw.map(p => {
+                return {
+                    ...p,
+                    x: imgElement.width - p.x // X座標を反転し直す
+                };
+            });
 
-            predictionsData = finalPredictions;
+            // ③ 両方の結果をガッチャンコ（重複を除外）
+            predictionsData = mergePredictions(originalPreds, revertedFlippedPreds, 0.4);
             
             drawCanvas();
             updateCounts();
@@ -316,6 +293,7 @@
             const fontSize = Math.max(12, canvas.width / 60);
             ctx.font = `bold ${fontSize}px Arial`;
             
+            // ★変更：パーセントを非表示にし、クラス名のみにする
             const text = `${p.class}`;
             const textWidth = ctx.measureText(text).width;
             ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
@@ -325,6 +303,7 @@
         
         ctx.globalAlpha = 1.0;
 
+        // 多角形の描画
         if (polygonPoints.length > 0) {
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
@@ -358,10 +337,10 @@
     }
 
     function getColorForClass(className) {
-        if (className === 's') return '#2e7d32'; 
-        if (className === 'h') return '#00838f'; 
-        if (className === 'r') return '#c62828'; 
-        if (className === 'w') return '#616161'; 
+        if (className === 's') return '#2e7d32'; // スギ
+        if (className === 'h') return '#00838f'; // ヒノキ
+        if (className === 'r') return '#c62828'; // 赤枯
+        if (className === 'w') return '#616161'; // 枯死
         return '#1565c0'; 
     }
 
