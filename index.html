@@ -58,7 +58,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂点 AI検知アプリ V0.7.2</h2>
+        <h2>🌲 樹頂点 AI検知アプリ V0.7.3</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -168,7 +168,6 @@
         return data.predictions || [];
     }
 
-    // ★ 改良：スマホでの画質劣化を防ぐため、100%の時はフィルターを通さない
     async function getVariationBlob(img, flip, brightness) {
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = img.width;
@@ -210,17 +209,14 @@
         return intersectionArea / unionArea;
     }
 
-    // ★ 改良：プロ仕様の NMS (Non-Maximum Suppression) アルゴリズム
-    // 全部の結果を混ぜてから、自信度が高い順に整理して重複を弾き飛ばします
-    function applyNMS(allPredictions, iouThreshold = 0.4) {
-        // 自信度（confidence）が高い順に並び替え
+    // ★ 修正箇所：重なり許容度（iouThreshold）を 0.4 から 0.75 へ大幅引き上げ
+    function applyNMS(allPredictions, iouThreshold = 0.75) {
         const sorted = allPredictions.sort((a, b) => b.confidence - a.confidence);
         const picked = [];
 
         for (const current of sorted) {
             let isDuplicate = false;
             for (const pickedBox of picked) {
-                // 同じクラスで、重なり具合が閾値を超えていれば「同じ木」と判定して除外
                 if (current.class === pickedBox.class && calculateIoU(current, pickedBox) > iouThreshold) {
                     isDuplicate = true;
                     break;
@@ -233,7 +229,6 @@
         return picked;
     }
 
-    // --- メイン推論処理（6回ループ） ---
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.disabled = true;
@@ -247,7 +242,7 @@
             { flip: true,  brightness:  70, label: "反転+暗" }
         ];
 
-        let allRawPredictions = []; // すべての結果を放り込む巨大な箱
+        let allRawPredictions = []; 
 
         try {
             for (let i = 0; i < variations.length; i++) {
@@ -257,7 +252,6 @@
                 const blob = await getVariationBlob(imgElement, v.flip, v.brightness);
                 const rawPreds = await fetchPredictionsFromBlob(blob);
 
-                // 座標の調整（反転戻し）
                 const adjustedPreds = rawPreds.map(p => {
                     return {
                         ...p,
@@ -265,12 +259,11 @@
                     };
                 });
 
-                // 一旦すべての結果を巨大な箱に追加
                 allRawPredictions.push(...adjustedPreds);
             }
 
-            // ★ ここでNMSを使って一気にガッチャンコ（重複排除）
-            predictionsData = applyNMS(allRawPredictions, 0.4);
+            // ★ NMS実行（閾値0.75で厳しく判定）
+            predictionsData = applyNMS(allRawPredictions, 0.75);
             
             drawCanvas();
             updateCounts();
