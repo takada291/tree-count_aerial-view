@@ -67,7 +67,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂検知アプリ V2.2</h2>
+        <h2>🌲 樹頂検知アプリ V2.3</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -135,6 +135,9 @@
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
+
+    // 指定したミリ秒だけ待機する関数（レートリミット回避用）
+    const delay = ms => new Promise(res => setTimeout(res, ms));
 
     function loadImage(event) {
         const file = event.target.files[0];
@@ -282,6 +285,11 @@
                 } else {
                     // 2回目以降はボーナスとして追加
                     finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
+                }
+
+                // ★レートリミット回避：通信が早すぎるとRoboflowに弾かれるため、1秒（1000ms）待つ
+                if (i < variations.length - 1) {
+                    await delay(1000);
                 }
             }
 
