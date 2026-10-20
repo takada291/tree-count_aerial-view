@@ -18,8 +18,6 @@
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
       gtag('js', new Date());
-
-      // ここも測定IDに書き換えます
       gtag('config', 'G-WXBP6CPKLP');
     </script>
     
@@ -52,7 +50,6 @@
         
         .mode-text { font-size: 0.85em; color: #d32f2f; margin-bottom: 10px; font-weight: bold; text-align: center;}
 
-        /* PCレイアウト用のCSS */
         .main-layout { display: flex; flex-direction: column; gap: 15px; }
         @media (min-width: 900px) {
             .main-layout { flex-direction: row; align-items: flex-start; }
@@ -67,7 +64,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂検知アプリ V2.3</h2>
+        <h2>🌲 樹頂検知アプリ V2.4</h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -116,8 +113,6 @@
     // ==========================================
     const PROJECT_NAME = "treetopcount"; 
     const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
-    
-    // 
     const MODEL_VERSION = 22;
     // ==========================================
 
@@ -135,9 +130,6 @@
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
-
-    // 指定したミリ秒だけ待機する関数（レートリミット回避用）
-    const delay = ms => new Promise(res => setTimeout(res, ms));
 
     function loadImage(event) {
         const file = event.target.files[0];
@@ -162,138 +154,40 @@
         reader.readAsDataURL(file);
     }
 
-    // APIへ画像を送信する関数
-    async function fetchPredictionsFromBlob(blob) {
-        const formData = new FormData();
-        formData.append("file", blob, "image.jpg");
-        const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
-        
-        const response = await fetch(url, {
-            method: 'POST',
-            body: formData
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`HTTP ${response.status}: ${errText}`);
-        }
-        const data = await response.json();
-        return data.predictions || [];
-    }
-
-    // 画像の加工（明暗・反転）を行う関数
-    async function getVariationBlob(img, flip, brightness) {
-        const tmpCanvas = document.createElement('canvas');
-        tmpCanvas.width = img.width;
-        tmpCanvas.height = img.height;
-        const tmpCtx = tmpCanvas.getContext('2d');
-
-        if (brightness !== 100) {
-            tmpCtx.filter = `brightness(${brightness}%)`;
-        }
-
-        if (flip) {
-            tmpCtx.translate(tmpCanvas.width, 0);
-            tmpCtx.scale(-1, 1);
-        }
-
-        tmpCtx.drawImage(img, 0, 0);
-        
-        if (brightness !== 100) {
-            tmpCtx.filter = 'none'; 
-        }
-
-        return await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
-    }
-
-    // 枠の重なり（IoU）を計算する関数
-    function calculateIoU(box1, box2) {
-        const x1 = Math.max(box1.x - box1.width / 2, box2.x - box2.width / 2);
-        const y1 = Math.max(box1.y - box1.height / 2, box2.y - box2.height / 2);
-        const x2 = Math.min(box1.x + box1.width / 2, box2.x + box2.width / 2);
-        const y2 = Math.min(box1.y + box1.height / 2, box2.y + box2.height / 2);
-
-        if (x2 <= x1 || y2 <= y1) return 0.0;
-
-        const intersectionArea = (x2 - x1) * (y2 - y1);
-        const box1Area = box1.width * box1.height;
-        const box2Area = box2.width * box2.height;
-        const unionArea = box1Area + box2Area - intersectionArea;
-
-        return intersectionArea / unionArea;
-    }
-
-    // 絶対に減らない「ボーナス追加方式」のマージ処理
-    function mergeNewPredictions(basePreds, newPreds, iouThreshold = 0.45) {
-        let combined = [...basePreds];
-
-        for (let newBox of newPreds) {
-            // ヒノキ（h）が推論結果に含まれていた場合はここで無視（除外）する
-            if (newBox.class === 'h') continue;
-
-            let isDuplicate = false;
-            for (let baseBox of combined) {
-                // 重なりが基準以上なら「既に検知済みの木」として無視
-                if (newBox.class === baseBox.class && calculateIoU(newBox, baseBox) > iouThreshold) {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-            // 新発見の木だけを追加
-            if (!isDuplicate) {
-                combined.push(newBox);
-            }
-        }
-        return combined;
-    }
-
-    // メイン推論処理（6回ループ）
+    // 安定版：1回だけシンプルに画像を送信して推論結果をもらう処理
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.disabled = true;
-        
-        const variations = [
-            { flip: false, brightness: 100, label: "標準" },
-            { flip: true,  brightness: 100, label: "反転" },
-            { flip: false, brightness: 130, label: "明(130%)" },
-            { flip: true,  brightness: 130, label: "反転+明" },
-            { flip: false, brightness:  70, label: "暗(70%)" },
-            { flip: true,  brightness:  70, label: "反転+暗" }
-        ];
-
-        let finalPredictions = []; 
+        btnDetect.innerText = "⏳ 推論中... (クラウド通信中)";
 
         try {
-            for (let i = 0; i < variations.length; i++) {
-                const v = variations[i];
-                btnDetect.innerText = `⏳ 推論中... (${i+1}/6) [${v.label}]`;
-                
-                const blob = await getVariationBlob(imgElement, v.flip, v.brightness);
-                const rawPreds = await fetchPredictionsFromBlob(blob);
+            // 画像をBlob形式に変換
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = imgElement.width;
+            tmpCanvas.height = imgElement.height;
+            const tmpCtx = tmpCanvas.getContext('2d');
+            tmpCtx.drawImage(imgElement, 0, 0);
+            const blob = await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
 
-                // 反転した場合は座標を元に戻す
-                const adjustedPreds = rawPreds.map(p => {
-                    return {
-                        ...p,
-                        x: v.flip ? imgElement.width - p.x : p.x
-                    };
-                });
+            const formData = new FormData();
+            formData.append("file", blob, "image.jpg");
+            const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
+            
+            const response = await fetch(url, {
+                method: 'POST',
+                body: formData
+            });
 
-                if (i === 0) {
-                    // 1回目（標準）を絶対的なベースとする。この時点でヒノキ（h）は除外する。
-                    finalPredictions = adjustedPreds.filter(p => p.class !== 'h');
-                } else {
-                    // 2回目以降はボーナスとして追加
-                    finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
-                }
-
-                // ★レートリミット回避：通信が早すぎるとRoboflowに弾かれるため、1秒（1000ms）待つ
-                if (i < variations.length - 1) {
-                    await delay(1000);
-                }
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`HTTP ${response.status}: ${errText}`);
             }
+            
+            const data = await response.json();
+            const rawPreds = data.predictions || [];
 
-            predictionsData = finalPredictions;
+            // ★ ヒノキ（h）を除外する処理
+            predictionsData = rawPreds.filter(p => p.class !== 'h');
             
             drawCanvas();
             updateCounts();
@@ -307,7 +201,6 @@
         btnDetect.disabled = false;
     }
 
-    // 描画処理
     function drawCanvas() {
         if(!imgElement.src) return;
         
@@ -339,7 +232,6 @@
             const fontSize = Math.max(12, canvas.width / 60);
             ctx.font = `bold ${fontSize}px Arial`;
             
-            // クラス名のみ表示（パーセント非表示）
             const text = `${p.class}`;
             const textWidth = ctx.measureText(text).width;
             ctx.fillRect(x, y - fontSize - 4, textWidth + 4, fontSize + 4);
@@ -349,7 +241,6 @@
         
         ctx.globalAlpha = 1.0;
 
-        // 多角形の描画
         if (polygonPoints.length > 0) {
             ctx.strokeStyle = '#f57f17';
             ctx.lineWidth = Math.max(3, canvas.width / 300);
@@ -496,7 +387,6 @@
         drawCanvas();
     });
 
-    // 古いService Workerの無効化処理
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
