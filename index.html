@@ -2,23 +2,15 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>樹頂検知</title>
-    
-    <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#2e7d32">
-    
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <meta name="apple-mobile-web-app-title" content="樹頂検知">
-    <link rel="apple-touch-icon" href="icon-512.png">
 
-    <!-- ★ リポジトリ内にファイルがあればローカルを使い、まだ無ければ本家サーバーから取得する自動切り替えフック -->
+    <!-- ★ リポジトリ内にモデルファイルがあれば優先使用し、無ければ本家サーバーへフォールバックするフック -->
     <script>
       (function() {
         function getLocalTarget(url) {
           if (typeof url !== 'string') return null;
-          if (url.includes('treetopcount/') || url.includes('model.json')) {
+          if (url.includes('model.json')) {
             return './model.json';
           }
           const binMatch = url.match(/group1-shard\d+of\d+\.bin/);
@@ -37,17 +29,17 @@
             try {
               const localRes = await originalFetch.call(this, localUrl, init);
               if (localRes.ok) {
-                return localRes; // リポジトリ内にファイルがあればそれを使用
+                return localRes;
               }
             } catch (e) {
-              // ローカルに無い場合はそのまま本家へフォールバック
+              // リポジトリに無い場合は本家へフォールバック
             }
           }
           return originalFetch.call(this, input, init);
         };
       })();
     </script>
-    <!-- リポジトリ内に roboflow.js が無ければ自動で公式CDNから読み込む -->
+    <!-- リポジトリ内の roboflow.js を優先し、無ければ公式CDNから読み込む -->
     <script src="./roboflow.js"></script>
     <script>
       if (typeof window.roboflow === 'undefined') {
@@ -64,7 +56,7 @@
     </script>
     
     <style>
-        body { font-family: -apple-system, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 10px; background: #e8f5e9; color: #333; margin: 0; padding-bottom: 40px; }
         .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
         .header-area { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #2e7d32; margin-bottom: 10px; padding-bottom: 5px; }
         h2 { margin: 0; font-size: 1.1em; color: #1b5e20; }
@@ -111,15 +103,15 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂検知アプリ V2.6 <span style="font-size:0.75em; color:#666;">(内蔵AI版)</span></h2>
+        <h2>🌲 樹頂検知アプリ V2.7 <span style="font-size:0.75em; color:#666;">(内蔵AI・6回推論版)</span></h2>
     </div>
-    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
+    <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択して検知ボタンを押してください</div>
 </div>
 
 <div class="main-layout">
     <div class="left-panel">
         <div class="card" style="margin-bottom:0; height:100%; display:flex; flex-direction:column;">
-            <div id="modeMessage" class="mode-text" style="display:none;">画像をタップして頂点を追加し、始点をタップして囲みを閉じます</div>
+            <div id="modeMessage" class="mode-text" style="display:none;">画像をクリックして頂点を追加し、始点をクリックして囲みを閉じます</div>
             <div id="canvas-container" style="flex-grow:1;">
                 <canvas id="viewCanvas"></canvas>
             </div>
@@ -129,11 +121,11 @@
     <div class="right-panel">
         <div class="card">
             <label class="btn btn-secondary" style="display:block;">
-                📸 写真を選択 / 撮影
-                <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
+                📸 写真を選択
+                <input type="file" id="imageInput" accept="image/*" style="display:none;" onchange="loadImage(event)">
             </label>
 
-            <button class="btn btn-teal" id="btnLoadModel" onclick="loadRoboflowModel()">📥 認識モデル読込（事前キャッシュ用）</button>
+            <button class="btn btn-teal" id="btnLoadModel" onclick="loadRoboflowModel()">📥 認識モデル読込</button>
 
             <div class="input-row">
                 <label>🎯 検出感度</label>
@@ -144,7 +136,7 @@
                 </select>
             </div>
 
-            <button id="btnDetect" class="btn btn-success" style="margin-bottom:0;" onclick="runDetection()" disabled>⚡ 内蔵AI検知スタート</button>
+            <button id="btnDetect" class="btn btn-success" style="margin-bottom:0;" onclick="runDetection()" disabled>⚡ 内蔵AI検知スタート (6回推論)</button>
         </div>
 
         <div class="card">
@@ -251,27 +243,32 @@
             statusMsg.innerText = "モデル読込エラーが発生しました";
             statusMsg.style.color = "#d32f2f";
             btn.disabled = false;
-            btn.innerText = "📥 認識モデル読込（事前キャッシュ用）";
+            btn.innerText = "📥 認識モデル読込";
         }
     }
 
-    function getStandardCanvas(img) {
+    // ★ 画像の反転・明暗バリエーションを生成するキャンバス関数
+    function getVariationCanvas(img, flip, brightness) {
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = img.width;
         tmpCanvas.height = img.height;
         const tmpCtx = tmpCanvas.getContext('2d');
-        tmpCtx.drawImage(img, 0, 0);
-        return tmpCanvas;
-    }
 
-    function getFlippedCanvas(img) {
-        const tmpCanvas = document.createElement('canvas');
-        tmpCanvas.width = img.width;
-        tmpCanvas.height = img.height;
-        const tmpCtx = tmpCanvas.getContext('2d');
-        tmpCtx.translate(tmpCanvas.width, 0);
-        tmpCtx.scale(-1, 1);
+        if (brightness !== 100) {
+            tmpCtx.filter = `brightness(${brightness}%)`;
+        }
+
+        if (flip) {
+            tmpCtx.translate(tmpCanvas.width, 0);
+            tmpCtx.scale(-1, 1);
+        }
+
         tmpCtx.drawImage(img, 0, 0);
+
+        if (brightness !== 100) {
+            tmpCtx.filter = 'none';
+        }
+
         return tmpCanvas;
     }
 
@@ -308,6 +305,7 @@
         return intersectionArea / unionArea;
     }
 
+    // ボーナス追加方式（ヒノキ除外付き）
     function mergeNewPredictions(basePreds, newPreds, iouThreshold = 0.45) {
         let combined = [...basePreds];
 
@@ -328,9 +326,21 @@
         return combined;
     }
 
+    // ★ 内蔵AIによる6回推論（標準・反転・明暗）メイン処理
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.disabled = true;
+
+        const variations = [
+            { flip: false, brightness: 100, label: "標準" },
+            { flip: true,  brightness: 100, label: "反転" },
+            { flip: false, brightness: 130, label: "明(130%)" },
+            { flip: true,  brightness: 130, label: "反転+明" },
+            { flip: false, brightness:  70, label: "暗(70%)" },
+            { flip: true,  brightness:  70, label: "反転+暗" }
+        ];
+
+        let finalPredictions = [];
 
         try {
             if (!treeModel) {
@@ -346,25 +356,24 @@
 
             applyRoboflowConfig();
 
-            btnDetect.innerText = "⏳ 推論中... (1/2) [標準]";
-            statusMsg.innerText = "内蔵AIで推論中... (1/2: 標準画像)";
-            await new Promise(r => setTimeout(r, 50));
+            for (let i = 0; i < variations.length; i++) {
+                const v = variations[i];
+                btnDetect.innerText = `⏳ 推論中... (${i+1}/6) [${v.label}]`;
+                statusMsg.innerText = `内蔵AIで高速推論中... (${i+1}/6: ${v.label})`;
+                await new Promise(r => setTimeout(r, 30)); // UI描画更新用
 
-            const standardCanvas = getStandardCanvas(imgElement);
-            const standardRaw = await treeModel.detect(standardCanvas);
-            const standardPreds = normalizePredictions(standardRaw, false, imgElement.width);
-            
-            let finalPredictions = standardPreds.filter(p => p.class !== 'h');
+                const varCanvas = getVariationCanvas(imgElement, v.flip, v.brightness);
+                const rawPreds = await treeModel.detect(varCanvas);
+                const adjustedPreds = normalizePredictions(rawPreds, v.flip, imgElement.width);
 
-            btnDetect.innerText = "⏳ 推論中... (2/2) [反転]";
-            statusMsg.innerText = "内蔵AIで推論中... (2/2: 左右反転画像)";
-            await new Promise(r => setTimeout(r, 50));
-
-            const flippedCanvas = getFlippedCanvas(imgElement);
-            const flippedRaw = await treeModel.detect(flippedCanvas);
-            const revertedFlippedPreds = normalizePredictions(flippedRaw, true, imgElement.width);
-
-            finalPredictions = mergeNewPredictions(finalPredictions, revertedFlippedPreds, 0.45);
+                if (i === 0) {
+                    // 1回目（標準）をベースとして確定（ヒノキは除外）
+                    finalPredictions = adjustedPreds.filter(p => p.class !== 'h');
+                } else {
+                    // 2回目以降は新発見の木のみをボーナス加算
+                    finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
+                }
+            }
 
             predictionsData = finalPredictions;
             
@@ -372,11 +381,11 @@
             updateCounts();
             
             btnDetect.innerText = "✅ 検知完了 (再実行)";
-            statusMsg.innerText = `✅ 検知完了！合計 ${predictionsData.length} 本を検出しました。`;
+            statusMsg.innerText = `✅ 6回推論完了！合計 ${predictionsData.length} 本を検出しました。`;
             statusMsg.style.color = "#2e7d32";
         } catch(e) {
             alert("AI検知エラー: " + e.message);
-            btnDetect.innerText = "⚡ 内蔵AI検知スタート";
+            btnDetect.innerText = "⚡ 内蔵AI検知スタート (6回推論)";
             statusMsg.innerText = "エラーが発生しました: " + e.message;
             statusMsg.style.color = "#d32f2f";
             console.error(e);
@@ -570,9 +579,14 @@
         drawCanvas();
     });
 
+    // 過去に登録されたService Workerがあれば自動解除する（PCブラウザ用）
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW registration note:', err));
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister(); 
+                }
+            });
         }
     });
 </script>
