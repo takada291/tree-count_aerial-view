@@ -13,6 +13,43 @@
     <meta name="apple-mobile-web-app-title" content="樹頂検知">
     <link rel="apple-touch-icon" href="icon-512.png">
 
+    <!-- ★ リポジトリ内の roboflow.js を読み込む前に、モデル通信先をローカルへ振り替えるフックを設定 -->
+    <script>
+      (function() {
+        function rewriteModelUrl(url) {
+          if (typeof url !== 'string') return url;
+          if (url.includes('treetopcount/') || url.includes('model.json')) {
+            return './model.json';
+          }
+          const binMatch = url.match(/group1-shard\d+of\d+\.bin/);
+          if (binMatch) {
+            return './' + binMatch[0];
+          }
+          return url;
+        }
+
+        const originalFetch = window.fetch;
+        window.fetch = function(input, init) {
+          if (typeof input === 'string') {
+            input = rewriteModelUrl(input);
+          } else if (input && typeof input.url === 'string') {
+            const newUrl = rewriteModelUrl(input.url);
+            if (newUrl !== input.url) {
+              input = new Request(newUrl, input);
+            }
+          }
+          return originalFetch.call(this, input, init);
+        };
+
+        const originalOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          const newUrl = rewriteModelUrl(url);
+          return originalOpen.call(this, method, newUrl, ...rest);
+        };
+      })();
+    </script>
+    <script src="./roboflow.js"></script>
+
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-WXBP6CPKLP"></script>
     <script>
       window.dataLayer = window.dataLayer || [];
@@ -32,11 +69,16 @@
         .btn-success { background: #2e7d32; color: white; }
         .btn-warning { background: #f57f17; color: white; }
         .btn-secondary { background: #6c757d; color: white; }
+        .btn-teal { background: #00897b; color: white; }
         
-        .btn:disabled { background: #bdbdbd; cursor: not-allowed; }
+        .btn:disabled { background: #bdbdbd !important; cursor: not-allowed; }
 
         .controls { display: flex; gap: 10px; margin-bottom: 10px; }
         .controls .btn { margin-bottom: 0; }
+
+        .input-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+        .input-row label { font-weight: bold; font-size: 0.9em; color: #1b5e20; width: 35%; }
+        .input-row select { width: 63%; padding: 8px; border: 1px solid #81c784; border-radius: 4px; font-size: 0.95rem; background: white; }
 
         #canvas-container { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 250px;}
         canvas { max-width: 100%; max-height: 75vh; height: auto; touch-action: none; display: block; }
@@ -64,7 +106,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂検知アプリ V2.5</h2>
+        <h2>🌲 樹頂検知アプリ V2.6 <span style="font-size:0.75em; color:#666;">(内蔵AI版)</span></h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択・撮影して検知ボタンを押してください</div>
 </div>
@@ -85,7 +127,19 @@
                 📸 写真を選択 / 撮影
                 <input type="file" id="imageInput" accept="image/*,capture=camera" style="display:none;" onchange="loadImage(event)">
             </label>
-            <button id="btnDetect" class="btn btn-success" onclick="runDetection()" disabled>🚀 クラウドAI検知スタート</button>
+
+            <button class="btn btn-teal" id="btnLoadModel" onclick="loadRoboflowModel()">📥 認識モデル読込（事前キャッシュ用）</button>
+
+            <div class="input-row">
+                <label>🎯 検出感度</label>
+                <select id="rfThresholdSelect">
+                    <option value="0.25">甘め・多め (25%以上)</option>
+                    <option value="0.40" selected>標準バランス (40%以上)</option>
+                    <option value="0.60">厳しめ・確実 (60%以上)</option>
+                </select>
+            </div>
+
+            <button id="btnDetect" class="btn btn-success" style="margin-bottom:0;" onclick="runDetection()" disabled>⚡ 内蔵AI検知スタート</button>
         </div>
 
         <div class="card">
@@ -109,14 +163,16 @@
 
 <script>
     // ==========================================
-    // API設定
+    // ★ 内蔵AIモデル（Roboflow）設定（内部上限5000本）
     // ==========================================
     const PROJECT_NAME = "treetopcount"; 
-    const API_KEY = "WgeEKIqfSAI1zfDZcRyS"; 
+    const RF_API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2"; // Publishable Key
     const MODEL_VERSION = 22;
+    const MAX_OBJECTS_LIMIT = 5000; // ★ カウント本数リミッターを5000本に大幅引き上げ
     // ==========================================
 
     let imgElement = new Image();
+    let treeModel = null;
     let predictionsData = [];
     
     const canvas = document.getElementById('viewCanvas');
@@ -130,9 +186,6 @@
     let polygonPoints = [];
     let mousePos = null;
     let isPolygonClosed = false;
-
-    // レートリミット回避用のウェイト関数
-    const delay = ms => new Promise(res => setTimeout(res, ms));
 
     function loadImage(event) {
         const file = event.target.files[0];
@@ -149,54 +202,94 @@
                 updateCounts();
                 btnDetect.disabled = false;
                 
-                statusMsg.innerText = "写真を選択・撮影して検知ボタンを押してください";
+                statusMsg.innerText = "「内蔵AI検知スタート」ボタンを押してください";
                 statusMsg.style.color = "#2e7d32";
             }
             imgElement.src = e.target.result;
         }
         reader.readAsDataURL(file);
+        event.target.value = '';
     }
 
-    async function fetchPredictionsFromBlob(blob) {
-        const formData = new FormData();
-        formData.append("file", blob, "image.jpg");
-        const url = `https://detect.roboflow.com/${PROJECT_NAME}/${MODEL_VERSION}?api_key=${API_KEY}`;
-        
-        const response = await fetch(url, {
-            method: 'POST',
-            body: formData
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`HTTP ${response.status}: ${errText}`);
+    // モデルの設定適用（上限5000本）
+    function applyRoboflowConfig() {
+        if (!treeModel) return;
+        const selectedThreshold = parseFloat(document.getElementById('rfThresholdSelect')?.value) || 0.40;
+        try {
+            treeModel.configure({
+                threshold: selectedThreshold,
+                overlap: 0.50,
+                max_objects: MAX_OBJECTS_LIMIT
+            });
+        } catch (e) {
+            console.log("Roboflow configure warning:", e);
         }
-        const data = await response.json();
-        return data.predictions || [];
     }
 
-    // 左右反転のみを行う加工関数（明るさは変えない）
-    async function getFlippedBlob(img) {
+    // 認識モデルの事前読み込み
+    async function loadRoboflowModel() {
+        const btn = document.getElementById('btnLoadModel');
+        btn.disabled = true;
+        btn.innerText = "⏳ 内蔵モデル読込中...";
+        statusMsg.innerText = "リポジトリ内の認識モデルを読み込んでいます...";
+        statusMsg.style.color = "#1565c0";
+        
+        try {
+            const rf = await window.roboflow.auth({ publishable_key: RF_API_KEY });
+            treeModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
+            applyRoboflowConfig();
+            
+            btn.innerText = "✅ 認識モデル準備完了";
+            btn.style.background = "#388e3c"; 
+            statusMsg.innerText = "認識モデルの準備が完了しました。オフラインでも高速検知が可能です。";
+            statusMsg.style.color = "#2e7d32";
+        } catch (error) {
+            alert("モデル読込失敗: " + error.message);
+            statusMsg.innerText = "モデル読込エラーが発生しました";
+            statusMsg.style.color = "#d32f2f";
+            btn.disabled = false;
+            btn.innerText = "📥 認識モデル読込（事前キャッシュ用）";
+        }
+    }
+
+    // 標準キャンバス生成
+    function getStandardCanvas(img) {
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = img.width;
         tmpCanvas.height = img.height;
         const tmpCtx = tmpCanvas.getContext('2d');
+        tmpCtx.drawImage(img, 0, 0);
+        return tmpCanvas;
+    }
 
+    // 左右反転キャンバス生成
+    function getFlippedCanvas(img) {
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = img.width;
+        tmpCanvas.height = img.height;
+        const tmpCtx = tmpCanvas.getContext('2d');
         tmpCtx.translate(tmpCanvas.width, 0);
         tmpCtx.scale(-1, 1);
         tmpCtx.drawImage(img, 0, 0);
-
-        return await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+        return tmpCanvas;
     }
 
-    // 通常のBlob生成関数（無加工）
-    async function getStandardBlob(img) {
-        const tmpCanvas = document.createElement('canvas');
-        tmpCanvas.width = img.width;
-        tmpCanvas.height = img.height;
-        const tmpCtx = tmpCanvas.getContext('2d');
-        tmpCtx.drawImage(img, 0, 0);
-        return await new Promise(resolve => tmpCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+    // roboflow.js の出力形式（bboxオブジェクト）を正規化する関数
+    function normalizePredictions(rawPreds, isFlipped, imgWidth) {
+        return rawPreds.map(p => {
+            const rawX = p.bbox ? p.bbox.x : p.x;
+            const rawY = p.bbox ? p.bbox.y : p.y;
+            const rawW = p.bbox ? p.bbox.width : p.width;
+            const rawH = p.bbox ? p.bbox.height : p.height;
+            return {
+                class: p.class,
+                confidence: p.confidence,
+                x: isFlipped ? (imgWidth - rawX) : rawX,
+                y: rawY,
+                width: rawW,
+                height: rawH
+            };
+        });
     }
 
     function calculateIoU(box1, box2) {
@@ -236,41 +329,50 @@
         return combined;
     }
 
-    // 2回推論のメイン処理
+    // 内蔵AIによる2回推論（標準＋左右反転）のメイン処理
     async function runDetection() {
         if(!imgElement.src) return;
         btnDetect.disabled = true;
 
-        let finalPredictions = []; 
-
         try {
+            // モデル未読込なら自動で読み込む
+            if (!treeModel) {
+                btnDetect.innerText = "⏳ モデル準備中...";
+                statusMsg.innerText = "リポジトリ内の認識モデルを読み込んでいます...";
+                const rf = await window.roboflow.auth({ publishable_key: RF_API_KEY });
+                treeModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
+                const loadBtn = document.getElementById('btnLoadModel');
+                loadBtn.innerText = "✅ 認識モデル準備完了";
+                loadBtn.style.background = "#388e3c";
+                loadBtn.disabled = true;
+            }
+
+            applyRoboflowConfig();
+
             // ==========================================
             // 1回目：標準推論（ベース）
             // ==========================================
-            btnDetect.innerText = `⏳ 推論中... (1/2) [標準]`;
-            const standardBlob = await getStandardBlob(imgElement);
-            const standardPredsRaw = await fetchPredictionsFromBlob(standardBlob);
+            btnDetect.innerText = "⏳ 推論中... (1/2) [標準]";
+            statusMsg.innerText = "内蔵AIで推論中... (1/2: 標準画像)";
+            await new Promise(r => setTimeout(r, 50)); // 画面表示更新用
+
+            const standardCanvas = getStandardCanvas(imgElement);
+            const standardRaw = await treeModel.detect(standardCanvas);
+            const standardPreds = normalizePredictions(standardRaw, false, imgElement.width);
             
             // ヒノキを除外してベースを確定
-            finalPredictions = standardPredsRaw.filter(p => p.class !== 'h');
-
-            // サーバーに怒られないように1秒待つ
-            await delay(1000);
+            let finalPredictions = standardPreds.filter(p => p.class !== 'h');
 
             // ==========================================
             // 2回目：左右反転推論（ボーナス探し）
             // ==========================================
-            btnDetect.innerText = `⏳ 推論中... (2/2) [反転]`;
-            const flippedBlob = await getFlippedBlob(imgElement);
-            const flippedPredsRaw = await fetchPredictionsFromBlob(flippedBlob);
+            btnDetect.innerText = "⏳ 推論中... (2/2) [反転]";
+            statusMsg.innerText = "内蔵AIで推論中... (2/2: 左右反転画像)";
+            await new Promise(r => setTimeout(r, 50));
 
-            // 座標を元に戻す
-            const revertedFlippedPreds = flippedPredsRaw.map(p => {
-                return {
-                    ...p,
-                    x: imgElement.width - p.x
-                };
-            });
+            const flippedCanvas = getFlippedCanvas(imgElement);
+            const flippedRaw = await treeModel.detect(flippedCanvas);
+            const revertedFlippedPreds = normalizePredictions(flippedRaw, true, imgElement.width);
 
             // 新しい木だけをボーナスとして加算
             finalPredictions = mergeNewPredictions(finalPredictions, revertedFlippedPreds, 0.45);
@@ -284,9 +386,13 @@
             updateCounts();
             
             btnDetect.innerText = "✅ 検知完了 (再実行)";
+            statusMsg.innerText = `✅ 検知完了！合計 ${predictionsData.length} 本を検出しました。`;
+            statusMsg.style.color = "#2e7d32";
         } catch(e) {
-            alert("検知エラー: 通信が弾かれました。\n" + e.message);
-            btnDetect.innerText = "🚀 クラウドAI検知スタート";
+            alert("AI検知エラー: " + e.message);
+            btnDetect.innerText = "⚡ 内蔵AI検知スタート";
+            statusMsg.innerText = "エラーが発生しました: " + e.message;
+            statusMsg.style.color = "#d32f2f";
             console.error(e);
         }
         btnDetect.disabled = false;
@@ -482,11 +588,7 @@
 
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(function(registrations) {
-                for(let registration of registrations) {
-                    registration.unregister(); 
-                }
-            });
+            navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW registration note:', err));
         }
     });
 </script>
