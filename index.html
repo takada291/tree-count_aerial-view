@@ -5,47 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>樹頂検知</title>
 
-    <!-- ★ リポジトリ内にモデルファイルがあれば優先使用し、無ければ本家サーバーへフォールバックするフック -->
-    <script>
-      (function() {
-        function getLocalTarget(url) {
-          if (typeof url !== 'string') return null;
-          if (url.includes('model.json')) {
-            return './model.json';
-          }
-          const binMatch = url.match(/group1-shard\d+of\d+\.bin/);
-          if (binMatch) {
-            return './' + binMatch[0];
-          }
-          return null;
-        }
-
-        const originalFetch = window.fetch;
-        window.fetch = async function(input, init) {
-          const url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
-          const localUrl = getLocalTarget(url);
-
-          if (localUrl) {
-            try {
-              const localRes = await originalFetch.call(this, localUrl, init);
-              if (localRes.ok) {
-                return localRes;
-              }
-            } catch (e) {
-              // リポジトリに無い場合は本家へフォールバック
-            }
-          }
-          return originalFetch.call(this, input, init);
-        };
-      })();
-    </script>
-    <!-- リポジトリ内の roboflow.js を優先し、無ければ公式CDNから読み込む -->
-    <script src="./roboflow.js"></script>
-    <script>
-      if (typeof window.roboflow === 'undefined') {
-        document.write('<script src="https://cdn.roboflow.com/0.2.26/roboflow.js"><\/script>');
-      }
-    </script>
+    <!-- ★ ONNX Runtime Web 読み込み -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
 
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-WXBP6CPKLP"></script>
     <script>
@@ -103,7 +64,7 @@
 
 <div class="card">
     <div class="header-area">
-        <h2>🌲 樹頂検知アプリ V2.7 <span style="font-size:0.75em; color:#666;">(内蔵AI・6回推論版)</span></h2>
+        <h2>🌲 樹頂検知アプリ V2.8 <span style="font-size:0.75em; color:#666;">(6回推論版)</span></h2>
     </div>
     <div id="statusMsg" style="font-size:0.9em; margin-bottom: 5px; color: #1565c0; font-weight: bold;">写真を選択して検知ボタンを押してください</div>
 </div>
@@ -125,7 +86,7 @@
                 <input type="file" id="imageInput" accept="image/*" style="display:none;" onchange="loadImage(event)">
             </label>
 
-            <button class="btn btn-teal" id="btnLoadModel" onclick="loadRoboflowModel()">📥 認識モデル読込</button>
+            <button class="btn btn-teal" id="btnLoadModel" onclick="loadOnnxModel()">📥 認識モデル読込</button>
 
             <div class="input-row">
                 <label>🎯 検出感度</label>
@@ -160,16 +121,24 @@
 
 <script>
     // ==========================================
-    // ★ 内蔵AIモデル（Roboflow）設定（内部上限5000本）
+    // ★ ONNX 内蔵AIモデル設定（上限5000本）
     // ==========================================
-    const PROJECT_NAME = "treetopcount"; 
-    const RF_API_KEY = "rf_sRyNyDbysrbVYyp2FNCslDCxdpN2"; 
-    const MODEL_VERSION = 22;
-    const MAX_OBJECTS_LIMIT = 5000; // カウント上限5000本
+    const MODEL_PATHS = ["./weights.onnx", "./model.onnx"]; // リポジトリ内の .onnx ファイル名候補
+    const INPUT_SIZE = 640;             // 学習時の入力サイズ (640x640 Stretch)
+    const NMS_IOU_THRESHOLD = 0.50;     // 単回推論内の重複排除基準
+    const TTA_MERGE_THRESHOLD = 0.45;   // 6回推論(TTA)統合時の重複排除基準
+    const MAX_OBJECTS_LIMIT = 5000;     // カウント上限5000本
+
+    // GitHub Pages（COOP/COEPなし環境）でも安定動作させるためのWASM設定
+    if (typeof ort !== "undefined") {
+        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+        ort.env.wasm.numThreads = 1;
+    }
     // ==========================================
 
     let imgElement = new Image();
-    let treeModel = null;
+    let ortSession = null;
+    let classNamesMap = null;
     let predictionsData = [];
     
     const canvas = document.getElementById('viewCanvas');
@@ -201,92 +170,140 @@
                 
                 statusMsg.innerText = "「内蔵AI検知スタート」ボタンを押してください";
                 statusMsg.style.color = "#2e7d32";
-            }
+            };
             imgElement.src = e.target.result;
-        }
+        };
         reader.readAsDataURL(file);
         event.target.value = '';
     }
 
-    function applyRoboflowConfig() {
-        if (!treeModel) return;
-        const selectedThreshold = parseFloat(document.getElementById('rfThresholdSelect')?.value) || 0.40;
+    // ONNXファイル内のメタデータ（Ultralyticsの names 辞書）からクラス名を自動抽出
+    function extractClassNamesFromOnnx(arrayBuffer) {
         try {
-            treeModel.configure({
-                threshold: selectedThreshold,
-                overlap: 0.50,
-                max_objects: MAX_OBJECTS_LIMIT
-            });
+            const bytes = new Uint8Array(arrayBuffer);
+            const scanSize = Math.min(bytes.length, 65536);
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+            const chunks = [
+                decoder.decode(bytes.subarray(bytes.length - scanSize)),
+                decoder.decode(bytes.subarray(0, scanSize))
+            ];
+
+            for (const text of chunks) {
+                const match = text.match(/names.{1,12}(\{\s*0\s*:\s*['"][^}]+?\})/);
+                if (match && match[1]) {
+                    const map = {};
+                    const pairRegex = /(\d+)\s*:\s*['"]([^'"]+)['"]/g;
+                    let m;
+                    while ((m = pairRegex.exec(match[1])) !== null) {
+                        map[parseInt(m[1], 10)] = m[2].trim().toLowerCase();
+                    }
+                    if (Object.keys(map).length > 0) {
+                        console.log("ONNXメタデータからクラス名を自動取得:", map);
+                        return map;
+                    }
+                }
+            }
         } catch (e) {
-            console.log("Roboflow configure warning:", e);
+            console.warn("クラス名メタデータの解析をスキップ:", e);
         }
+        return null;
     }
 
-    async function loadRoboflowModel() {
+    // クラス名取得のフォールバック（メタデータが無い場合はアルファベット順を使用）
+    function getClassName(classId, numClasses) {
+        if (classNamesMap && classNamesMap[classId] !== undefined) {
+            return classNamesMap[classId];
+        }
+        if (numClasses === 4) {
+            return ['h', 'r', 's', 'w'][classId] || String(classId);
+        }
+        if (numClasses === 3) {
+            return ['r', 's', 'w'][classId] || String(classId);
+        }
+        return ['s', 'r', 'w', 'h'][classId] || String(classId);
+    }
+
+    // リポジトリ内の ONNX モデルを読み込む
+    async function loadOnnxModel() {
+        if (ortSession) return;
         const btn = document.getElementById('btnLoadModel');
         btn.disabled = true;
-        btn.innerText = "⏳ モデル読込中...";
-        statusMsg.innerText = "認識モデルを読み込んでいます...";
+        btn.innerText = "⏳ ONNXモデル読込中...";
+        statusMsg.innerText = "リポジトリ内のONNX認識モデルを読み込んでいます...";
         statusMsg.style.color = "#1565c0";
-        
+
         try {
-            const rf = await window.roboflow.auth({ publishable_key: RF_API_KEY });
-            treeModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
-            applyRoboflowConfig();
-            
-            btn.innerText = "✅ 認識モデル準備完了";
-            btn.style.background = "#388e3c"; 
-            statusMsg.innerText = "認識モデルの準備が完了しました。";
+            let modelBuffer = null;
+            let loadedPath = "";
+
+            for (const path of MODEL_PATHS) {
+                const res = await fetch(path);
+                if (res.ok) {
+                    modelBuffer = await res.arrayBuffer();
+                    loadedPath = path;
+                    break;
+                }
+            }
+
+            if (!modelBuffer) {
+                throw new Error("モデルファイル（weights.onnx / model.onnx）がリポジトリに見つかりません。");
+            }
+
+            classNamesMap = extractClassNamesFromOnnx(modelBuffer);
+
+            ortSession = await ort.InferenceSession.create(new Uint8Array(modelBuffer), {
+                executionProviders: ['wasm']
+            });
+
+            console.log(`ONNX読込完了 (${loadedPath})`, {
+                inputs: ortSession.inputNames,
+                outputs: ortSession.outputNames
+            });
+
+            btn.innerText = "✅ ONNXモデル準備完了";
+            btn.style.background = "#388e3c";
+            statusMsg.innerText = "ONNX認識モデルの準備が完了しました。";
             statusMsg.style.color = "#2e7d32";
         } catch (error) {
             alert("モデル読込失敗: " + error.message);
-            statusMsg.innerText = "モデル読込エラーが発生しました";
+            statusMsg.innerText = "モデル読込エラー: " + error.message;
             statusMsg.style.color = "#d32f2f";
             btn.disabled = false;
             btn.innerText = "📥 認識モデル読込";
+            throw error;
         }
     }
 
-    // ★ 画像の反転・明暗バリエーションを生成するキャンバス関数
-    function getVariationCanvas(img, flip, brightness) {
+    // 画像を 640x640（Stretch）＋ 反転・明暗加工して ONNX 入力テンソルを生成
+    function createInputTensor(img, flip, brightness) {
         const tmpCanvas = document.createElement('canvas');
-        tmpCanvas.width = img.width;
-        tmpCanvas.height = img.height;
-        const tmpCtx = tmpCanvas.getContext('2d');
+        tmpCanvas.width = INPUT_SIZE;
+        tmpCanvas.height = INPUT_SIZE;
+        const tmpCtx = tmpCanvas.getContext('2d', { willReadFrequently: true });
 
         if (brightness !== 100) {
             tmpCtx.filter = `brightness(${brightness}%)`;
         }
-
         if (flip) {
-            tmpCtx.translate(tmpCanvas.width, 0);
+            tmpCtx.translate(INPUT_SIZE, 0);
             tmpCtx.scale(-1, 1);
         }
 
-        tmpCtx.drawImage(img, 0, 0);
+        // 学習時と同一の Stretch リサイズで描画
+        tmpCtx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE);
+        tmpCtx.filter = 'none';
 
-        if (brightness !== 100) {
-            tmpCtx.filter = 'none';
+        const imgData = tmpCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+        const area = INPUT_SIZE * INPUT_SIZE;
+        const float32Data = new Float32Array(3 * area);
+
+        for (let i = 0; i < area; i++) {
+            float32Data[i] = imgData[i * 4] / 255.0;                 // R
+            float32Data[area + i] = imgData[i * 4 + 1] / 255.0;      // G
+            float32Data[2 * area + i] = imgData[i * 4 + 2] / 255.0;  // B
         }
 
-        return tmpCanvas;
-    }
-
-    function normalizePredictions(rawPreds, isFlipped, imgWidth) {
-        return rawPreds.map(p => {
-            const rawX = p.bbox ? p.bbox.x : p.x;
-            const rawY = p.bbox ? p.bbox.y : p.y;
-            const rawW = p.bbox ? p.bbox.width : p.width;
-            const rawH = p.bbox ? p.bbox.height : p.height;
-            return {
-                class: p.class,
-                confidence: p.confidence,
-                x: isFlipped ? (imgWidth - rawX) : rawX,
-                y: rawY,
-                width: rawW,
-                height: rawH
-            };
-        });
+        return new ort.Tensor('float32', float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
     }
 
     function calculateIoU(box1, box2) {
@@ -305,12 +322,125 @@
         return intersectionArea / unionArea;
     }
 
-    // ボーナス追加方式（ヒノキ除外付き）
-    function mergeNewPredictions(basePreds, newPreds, iouThreshold = 0.45) {
+    // 単回推論結果に対するクラス別 NMS（上限5000本）
+    function applySinglePassNMS(boxes, iouThreshold = NMS_IOU_THRESHOLD) {
+        boxes.sort((a, b) => b.confidence - a.confidence);
+        const selected = [];
+
+        for (const box of boxes) {
+            let isDuplicate = false;
+            for (const picked of selected) {
+                if (box.class === picked.class && calculateIoU(box, picked) > iouThreshold) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                selected.push(box);
+                if (selected.length >= MAX_OBJECTS_LIMIT) break;
+            }
+        }
+        return selected;
+    }
+
+    // YOLOv8 ONNX出力テンソルを解析してバウンディングボックス配列へ変換
+    function parseYoloOutput(outputTensor, threshold, isFlipped, imgWidth, imgHeight) {
+        const data = outputTensor.data;
+        const dims = outputTensor.dims; // 通常 [1, 4 + numClasses, 8400]
+        const scaleX = imgWidth / INPUT_SIZE;
+        const scaleY = imgHeight / INPUT_SIZE;
+
+        const rawBoxes = [];
+
+        if (dims.length === 3 && dims[1] < dims[2]) {
+            // [1, C, N] 形式（標準的なYOLOv8）
+            const numChannels = dims[1];
+            const numAnchors = dims[2];
+            const numClasses = numChannels - 4;
+
+            for (let i = 0; i < numAnchors; i++) {
+                let bestScore = -1;
+                let bestClassId = -1;
+
+                for (let c = 0; c < numClasses; c++) {
+                    const score = data[(4 + c) * numAnchors + i];
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestClassId = c;
+                    }
+                }
+
+                if (bestScore < threshold) continue;
+
+                const className = getClassName(bestClassId, numClasses);
+                if (className === 'h') continue; // ヒノキは除外
+
+                const cx = data[0 * numAnchors + i];
+                const cy = data[1 * numAnchors + i];
+                const bw = data[2 * numAnchors + i];
+                const bh = data[3 * numAnchors + i];
+
+                const mappedX = cx * scaleX;
+                rawBoxes.push({
+                    class: className,
+                    confidence: bestScore,
+                    x: isFlipped ? (imgWidth - mappedX) : mappedX,
+                    y: cy * scaleY,
+                    width: bw * scaleX,
+                    height: bh * scaleY
+                });
+            }
+        } else if (dims.length === 3) {
+            // [1, N, C] 形式のフォールバック
+            const numAnchors = dims[1];
+            const numChannels = dims[2];
+            const numClasses = numChannels - 4;
+
+            for (let i = 0; i < numAnchors; i++) {
+                const offset = i * numChannels;
+                let bestScore = -1;
+                let bestClassId = -1;
+
+                for (let c = 0; c < numClasses; c++) {
+                    const score = data[offset + 4 + c];
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestClassId = c;
+                    }
+                }
+
+                if (bestScore < threshold) continue;
+
+                const className = getClassName(bestClassId, numClasses);
+                if (className === 'h') continue;
+
+                const cx = data[offset + 0];
+                const cy = data[offset + 1];
+                const bw = data[offset + 2];
+                const bh = data[offset + 3];
+
+                const mappedX = cx * scaleX;
+                rawBoxes.push({
+                    class: className,
+                    confidence: bestScore,
+                    x: isFlipped ? (imgWidth - mappedX) : mappedX,
+                    y: cy * scaleY,
+                    width: bw * scaleX,
+                    height: bh * scaleY
+                });
+            }
+        }
+
+        return applySinglePassNMS(rawBoxes, NMS_IOU_THRESHOLD);
+    }
+
+    // ボーナス追加方式（6回推論の統合・ヒノキ除外付き）
+    function mergeNewPredictions(basePreds, newPreds, iouThreshold = TTA_MERGE_THRESHOLD) {
         let combined = [...basePreds];
 
         for (let newBox of newPreds) {
             if (newBox.class === 'h') continue;
+            if (combined.length >= MAX_OBJECTS_LIMIT) break;
 
             let isDuplicate = false;
             for (let baseBox of combined) {
@@ -326,10 +456,12 @@
         return combined;
     }
 
-    // ★ 内蔵AIによる6回推論（標準・反転・明暗）メイン処理
+    // ★ ONNX 内蔵AIによる6回推論（標準・反転・明暗）メイン処理
     async function runDetection() {
-        if(!imgElement.src) return;
+        if (!imgElement.src) return;
         btnDetect.disabled = true;
+
+        const selectedThreshold = parseFloat(document.getElementById('rfThresholdSelect')?.value) || 0.40;
 
         const variations = [
             { flip: false, brightness: 100, label: "標準" },
@@ -343,35 +475,42 @@
         let finalPredictions = [];
 
         try {
-            if (!treeModel) {
+            if (!ortSession) {
                 btnDetect.innerText = "⏳ モデル準備中...";
-                statusMsg.innerText = "認識モデルを読み込んでいます...";
-                const rf = await window.roboflow.auth({ publishable_key: RF_API_KEY });
-                treeModel = await rf.load({ model: PROJECT_NAME, version: MODEL_VERSION });
-                const loadBtn = document.getElementById('btnLoadModel');
-                loadBtn.innerText = "✅ 認識モデル準備完了";
-                loadBtn.style.background = "#388e3c";
-                loadBtn.disabled = true;
+                await loadOnnxModel();
             }
 
-            applyRoboflowConfig();
+            const inputName = ortSession.inputNames[0];
+            const outputName = ortSession.outputNames[0];
 
             for (let i = 0; i < variations.length; i++) {
                 const v = variations[i];
-                btnDetect.innerText = `⏳ 推論中... (${i+1}/6) [${v.label}]`;
-                statusMsg.innerText = `内蔵AIで高速推論中... (${i+1}/6: ${v.label})`;
+                btnDetect.innerText = `⏳ 推論中... (${i + 1}/6) [${v.label}]`;
+                statusMsg.innerText = `ONNX内蔵AIで高速推論中... (${i + 1}/6: ${v.label})`;
+                statusMsg.style.color = "#1565c0";
                 await new Promise(r => setTimeout(r, 30)); // UI描画更新用
 
-                const varCanvas = getVariationCanvas(imgElement, v.flip, v.brightness);
-                const rawPreds = await treeModel.detect(varCanvas);
-                const adjustedPreds = normalizePredictions(rawPreds, v.flip, imgElement.width);
+                const inputTensor = createInputTensor(imgElement, v.flip, v.brightness);
+                const feeds = {};
+                feeds[inputName] = inputTensor;
+
+                const results = await ortSession.run(feeds);
+                const outputTensor = results[outputName];
+
+                const passPreds = parseYoloOutput(
+                    outputTensor,
+                    selectedThreshold,
+                    v.flip,
+                    imgElement.width,
+                    imgElement.height
+                );
 
                 if (i === 0) {
-                    // 1回目（標準）をベースとして確定（ヒノキは除外）
-                    finalPredictions = adjustedPreds.filter(p => p.class !== 'h');
+                    // 1回目（標準）をベースとして確定
+                    finalPredictions = passPreds;
                 } else {
                     // 2回目以降は新発見の木のみをボーナス加算
-                    finalPredictions = mergeNewPredictions(finalPredictions, adjustedPreds, 0.45);
+                    finalPredictions = mergeNewPredictions(finalPredictions, passPreds, TTA_MERGE_THRESHOLD);
                 }
             }
 
@@ -383,7 +522,7 @@
             btnDetect.innerText = "✅ 検知完了 (再実行)";
             statusMsg.innerText = `✅ 6回推論完了！合計 ${predictionsData.length} 本を検出しました。`;
             statusMsg.style.color = "#2e7d32";
-        } catch(e) {
+        } catch (e) {
             alert("AI検知エラー: " + e.message);
             btnDetect.innerText = "⚡ 内蔵AI検知スタート (6回推論)";
             statusMsg.innerText = "エラーが発生しました: " + e.message;
@@ -394,7 +533,7 @@
     }
 
     function drawCanvas() {
-        if(!imgElement.src) return;
+        if (!imgElement.src) return;
         
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(imgElement, 0, 0);
@@ -439,7 +578,7 @@
             
             ctx.beginPath();
             ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
-            for(let i = 1; i < polygonPoints.length; i++) {
+            for (let i = 1; i < polygonPoints.length; i++) {
                 ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
             }
             
@@ -457,8 +596,8 @@
             
             polygonPoints.forEach((pt, index) => {
                 ctx.beginPath();
-                const radius = (index === 0 && !isPolygonClosed) ? Math.max(8, canvas.width/200) : Math.max(4, canvas.width/400);
-                ctx.arc(pt.x, pt.y, radius, 0, 2*Math.PI);
+                const radius = (index === 0 && !isPolygonClosed) ? Math.max(8, canvas.width / 200) : Math.max(4, canvas.width / 400);
+                ctx.arc(pt.x, pt.y, radius, 0, 2 * Math.PI);
                 ctx.fillStyle = (index === 0 && !isPolygonClosed) ? 'rgba(245, 127, 23, 0.8)' : '#f57f17';
                 ctx.fill();
             });
@@ -525,7 +664,7 @@
         let clientX = e.clientX;
         let clientY = e.clientY;
         
-        if(e.touches && e.touches.length > 0) {
+        if (e.touches && e.touches.length > 0) {
             clientX = e.touches[0].clientX;
             clientY = e.touches[0].clientY;
         }
@@ -561,7 +700,7 @@
                 const dy = pt.y - polygonPoints[0].y;
                 const hitRadius = 30 * (canvas.width / canvas.getBoundingClientRect().width); 
                 
-                if (Math.sqrt(dx*dx + dy*dy) < hitRadius) {
+                if (Math.sqrt(dx * dx + dy * dy) < hitRadius) {
                     isPolygonClosed = true;
                     drawCanvas();
                     updateCounts();
@@ -583,7 +722,7 @@
     window.addEventListener('load', () => {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.getRegistrations().then(function(registrations) {
-                for(let registration of registrations) {
+                for (let registration of registrations) {
                     registration.unregister(); 
                 }
             });
